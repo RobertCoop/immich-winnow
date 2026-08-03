@@ -60,9 +60,14 @@ services:
     env_file:
       - .env                      # reuse the Immich stack's .env
     environment:
+      # --- critical: Winnow cannot run without these three -----------------
       # Reach Immich by its compose service name (adjust if yours differs):
       IMMICH_URL: http://immich-server:2283
-      # Optional watcher tuning — every CLI flag has a WINNOW_* env var:
+      # Both keys come from the stack's .env via env_file above; spelled out
+      # here so nothing is implicit (or paste the values directly):
+      IMMICH_API_KEY: ${IMMICH_API_KEY}         # Immich → Account Settings → API Keys
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}   # console.anthropic.com
+      # --- optional watcher tuning — every CLI flag has a WINNOW_* env var:
       # WINNOW_EVERY: "7d"        # cycle cadence: 30m, 6h, 7d, 1w
       # WINNOW_APPLY: "false"     # review-first: judge but don't write back
       # SCORING_LIMIT: "500"      # cap re-judged ranking anchors per cycle
@@ -73,8 +78,9 @@ volumes:
   immich-winnow-data:
 ```
 
-**2. Add two keys** to the stack's `.env` (see [Configure](#configure) for
-details, including the Immich API-key permissions):
+**2. Define the two keys** in the stack's `.env`, which the block above
+passes through (see [Configure](#configure) for details, including the
+Immich API-key permissions):
 
 ```ini
 IMMICH_API_KEY=...      # Immich → Account Settings → API Keys (All permissions)
