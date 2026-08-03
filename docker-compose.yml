@@ -71,6 +71,11 @@ services:
       # SCORING_LIMIT: "0"                # max already-scored anchors re-judged per run
       #                                   # (new photos always score); 0 = unlimited
 
+      # ---- star bands ---------------------------------------------------------
+      # FIVE_STAR_FRACTION: "0.05"       # share of ranked candidates crowned five-star
+      # FOUR_STAR_FRACTION: "0.15"       # next band, from ranking evidence
+      # FULL_STAR_SPECTRUM: "false"      # also assign 3/2/1 stars across the library
+
       # ---- write-back behavior -----------------------------------------------
       # BEST_ALBUM: "Five-Stars"         # album for the best photos ("" disables)
       # BEST_ALBUM_MIN_STARS: "5"        # 5 = five-star only, 4 = include four-star

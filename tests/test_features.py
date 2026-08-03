@@ -442,3 +442,100 @@ def test_poll_wait_blocks_until_ingested(settings_env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert waited == [True]
     assert "All batches ingested" in result.output
+
+
+# ----------------------------------------------------------------------
+# proportional star bands + full spectrum
+# ----------------------------------------------------------------------
+
+from winnow.schemas import TriageVerdict  # noqa: E402
+
+
+def _seed_scored(tmp_path, n: int) -> Ledger:
+    """A ledger with ``n`` fully-ranked candidates, w00 strongest."""
+    ledger = Ledger(tmp_path / "bands.db")
+    ids = [f"w{i:02d}" for i in range(n)]
+    ledger.upsert_assets([_asset_row(i) for i in ids])
+    for x, y in combinations(ids, 2):
+        ledger.record_pair(x, y, x, "rank", "test-model")
+        ledger.record_pair(y, x, x, "finals", "test-model")
+    ledger.upsert_scores({aid: (float(n - i), i + 1) for i, aid in enumerate(ids)})
+    return ledger
+
+
+def test_star_bands_scale_with_the_candidate_pool(settings, tmp_path):
+    ledger = _seed_scored(tmp_path, 40)
+    stats = run_finals(settings, ledger, _NeverCalledJudge())
+    # defaults: 5% five, 15% four — of the SCORED pool, not a fixed 50
+    assert stats.five_star == 2
+    assert stats.four_star == 6
+    assert stats.three_star == 0  # spectrum off by default
+    buckets = {r["asset_id"]: r["bucket"] for r in ledger.decisions()}
+    assert buckets["w00"] == "five_star"
+    assert buckets["w07"] == "four_star"
+    assert "w08" not in buckets
+
+
+def test_star_fractions_are_configurable(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("FIVE_STAR_FRACTION", "0.25")
+    monkeypatch.setenv("FOUR_STAR_FRACTION", "0.5")
+    settings = load_settings()
+    ledger = _seed_scored(tmp_path, 20)
+    stats = run_finals(settings, ledger, _NeverCalledJudge())
+    assert stats.five_star == 5
+    assert stats.four_star == 10
+
+
+def test_full_spectrum_rates_the_whole_library(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("FULL_STAR_SPECTRUM", "true")
+    settings = load_settings()
+    ledger = _seed_scored(tmp_path, 20)
+    # two middles that never became candidates: one ordinary, one poor
+    ledger.upsert_assets([_asset_row("mid-ok"), _asset_row("mid-poor"), _asset_row("shot")])
+    for asset_id, score in (("mid-ok", 6), ("mid-poor", 3)):
+        ledger.record_triage(
+            asset_id,
+            TriageVerdict(
+                category="photo",
+                verdict="neutral",
+                technical_score=score,
+                reasons=[],
+                confidence="medium",
+            ),
+            "test-model",
+            None,
+        )
+    # a screenshot must never be star-rated by the spectrum
+    ledger.record_triage(
+        "shot",
+        TriageVerdict(
+            category="screenshot",
+            verdict="neutral",
+            technical_score=6,
+            reasons=[],
+            confidence="high",
+        ),
+        "test-model",
+        None,
+    )
+
+    stats = run_finals(settings, ledger, _NeverCalledJudge())
+    assert stats.five_star == 1  # 5% of 20
+    assert stats.four_star == 3  # 15% of 20
+    assert stats.three_star == 16  # every remaining ranked candidate
+    assert stats.two_star == 1 and stats.one_star == 1
+    buckets = {r["asset_id"]: r["bucket"] for r in ledger.decisions()}
+    assert buckets["mid-ok"] == "two_star"
+    assert buckets["mid-poor"] == "one_star"
+    assert "shot" not in buckets
+
+
+def test_low_star_writeback_is_rating_only(tmp_path):
+    ledger = Ledger(tmp_path / "low.db")
+    ledger.upsert_assets([_asset_row("x1"), _asset_row("x2")])
+    ledger.set_decision("x1", "three_star", {"stars": 3})
+    ledger.set_decision("x2", "one_star", {"stars": 1})
+    ops = {a.bucket: a.api_ops for a in writeback.plan(ledger)}
+    assert ops["three_star"] == [{"op": "update_asset", "asset_id": "x1", "rating": 3}]
+    assert ops["one_star"] == [{"op": "update_asset", "asset_id": "x2", "rating": 1}]
+    assert all(a.group == "stars" for a in writeback.plan(ledger))

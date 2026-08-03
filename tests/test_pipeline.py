@@ -820,8 +820,9 @@ def test_finals_default_five_count(
     ranked: RankStats, settings: Settings, ledger: Ledger, judge: StubJudge
 ) -> None:
     stats = run_finals(settings, ledger, judge)
-    assert stats.five_star == 1  # 20% of a four-photo pool, at least one
-    assert stats.four_star == 0  # 30% of the remaining three rounds down to zero
+    assert stats.five_star == 1  # 5% of four scored candidates, floor of one
+    assert stats.four_star == 1  # 15% of four scored candidates rounds to one
+    assert stats.three_star == 0  # full spectrum is opt-in
 
 
 # ----------------------------------------------------------------------

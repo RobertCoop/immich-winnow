@@ -216,6 +216,9 @@ file works too — never commit it).
 | `CACHE_DIR` | `.winnow-cache` | Resized thumbnails (~120 KB per photo). |
 | `CANDIDATE_SCORE_MIN` | `8` | Triage score floor for entering stage 2. Lower = rank more photos. |
 | `SCORING_LIMIT` | `0` | Max already-scored photos re-judged as ranking anchors per run (new photos always score). `0` = unlimited. |
+| `FIVE_STAR_FRACTION` | `0.05` | Share of ranked candidates crowned five-star (per run, Opus-refined). |
+| `FOUR_STAR_FRACTION` | `0.15` | Next band, straight from ranking evidence. |
+| `FULL_STAR_SPECTRUM` | `false` | Also assign ★★★ (remaining candidates), ★★ (ordinary keepers), ★ (poor but kept) — rates nearly every photo. |
 | `BEST_ALBUM` | `Five-Stars` | Album that collects your best photos. `""` disables. |
 | `BEST_ALBUM_MIN_STARS` | `5` | `4` also pulls the four-star band into the album. |
 | `FIVE_STAR_FAVORITE` | `true` | Also mark five-star photos as Immich favorites. |
@@ -295,6 +298,11 @@ reject or an unsure "that's a meme" stays in the untouched middle.
 
 ## Design notes
 
+- **Star bands scale with your library.** Five/four-star counts are
+  fractions of the ranked candidate pool (5% / 15% by default — roughly the
+  top 0.4% / 1.2% of a typical library), not a fixed quota. Opus refines the
+  crown zone; the four-star band comes straight from the ranking evidence.
+  `FULL_STAR_SPECTRUM=true` extends this to 3/2/1 stars across everything.
 - **Five stars are sticky.** Once a photo earns five stars — from Winnow or
   rated five in Immich by you — later runs never score it lower. A re-ranking
   can only demote it when you pass `finals --allow-demotions`.

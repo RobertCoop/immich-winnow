@@ -24,7 +24,6 @@ from winnow.pipeline.scan import ProgressFn, emit, load_thumb_b64
 from winnow.ranking import TIE, star_bands, swiss_pairs
 
 __all__ = [
-    "DEFAULT_FIVE_FRACTION",
     "STAGE",
     "FinalsStats",
     "PairOutcome",
@@ -35,8 +34,8 @@ __all__ = [
 #: Stage label recorded on every pair the finals judge.
 STAGE = "finals"
 
-#: Share of the finals pool that earns five stars when no count is given.
-DEFAULT_FIVE_FRACTION = 0.2
+#: Star value -> decision bucket, for every band the finals can assign.
+_STAR_BUCKETS = {5: "five_star", 4: "four_star", 3: "three_star", 2: "two_star", 1: "one_star"}
 
 
 @dataclass
@@ -52,6 +51,9 @@ class FinalsStats:
         disagreements: Pairs where swapping the order flipped the answer.
         five_star: Photos awarded five stars.
         four_star: Photos awarded four stars.
+        three_star: Ranked candidates below the four-star cut (full spectrum).
+        two_star: Ordinary keepers rated from triage evidence (full spectrum).
+        one_star: Poor-but-kept photos rated from triage evidence (full spectrum).
         protected: Prior five-stars kept at five against a lower fresh ranking.
         errors: Pairs skipped after an unusable reply or a missing thumbnail.
         input_tokens: Prompt tokens consumed.
@@ -66,6 +68,9 @@ class FinalsStats:
     disagreements: int = 0
     five_star: int = 0
     four_star: int = 0
+    three_star: int = 0
+    two_star: int = 0
+    one_star: int = 0
     protected: int = 0
     errors: int = 0
     input_tokens: int = 0
@@ -136,7 +141,7 @@ def run_finals(
     judge: Judge,
     *,
     five_count: int | None = None,
-    four_frac: float = 0.3,
+    four_frac: float | None = None,
     allow_demotions: bool = False,
     on_progress: ProgressFn | None = None,
 ) -> FinalsStats:
@@ -147,8 +152,10 @@ def run_finals(
         ledger: Open ledger; must already hold stage-2 scores.
         judge: Judge wrapping an Anthropic client.
         five_count: How many photos get five stars; defaults to
-            :data:`DEFAULT_FIVE_FRACTION` of the pool (at least one).
-        four_frac: Share of the photos below the five-star cut that get four.
+            ``settings.five_star_fraction`` of the scored candidates (min 1).
+        four_frac: Explicit share of the photos below the five-star cut that
+            get four; ``None`` (default) sizes the band from
+            ``settings.four_star_fraction`` of the scored candidates.
         allow_demotions: Five stars are sticky by default — a photo that ever
             earned five (from Winnow, or already rated five in Immich itself)
             is never re-scored lower by a later run. Pass ``True`` to let a
@@ -159,7 +166,13 @@ def run_finals(
         Counters describing the run.
     """
     stats = FinalsStats()
-    pool = _pool(ledger, settings.finals_pool_size)
+    n_scored = sum(1 for row in ledger.score_rows() if row.get("bt_score") is not None)
+    five_target = five_count
+    if five_target is None:
+        five_target = max(1, round(n_scored * settings.five_star_fraction))
+    # The Opus pool covers at least twice the crown zone, so every plausible
+    # five-star has played head-to-heads before the cut.
+    pool = _pool(ledger, max(settings.finals_pool_size, 2 * five_target))
     stats.pool = len(pool)
     if len(pool) < 2:
         emit(on_progress, "finals pool too small to judge")
@@ -208,14 +221,24 @@ def run_finals(
         scores = {item: fitted.get(item, scores.get(item, 1.0)) for item in pool}
 
     ranked = refit_scores(ledger, collect_pairs(ledger))
-    order = [item for item, _score, _rank in ranked if item in pool_set]
+    # Bands cut the GLOBAL ranking, not just the Opus pool — stage-2 evidence
+    # is plenty for the four-star band, so star counts scale with the library
+    # instead of being capped by the finals pool size.
+    order = [item for item, _score, _rank in ranked]
     if not order:
         order = pool
 
-    fives = five_count
-    if fives is None:
-        fives = max(1, round(len(order) * DEFAULT_FIVE_FRACTION))
-    bands = star_bands(order, five_count=fives, four_frac=four_frac)
+    fives = min(five_target, len(order))
+    if four_frac is not None:
+        bands = star_bands(order, five_count=fives, four_frac=four_frac)
+    else:
+        four_target = round(n_scored * settings.four_star_fraction)
+        bands = {asset_id: 5 for asset_id in order[:fives]}
+        for asset_id in order[fives : fives + four_target]:
+            bands[asset_id] = 4
+    if settings.full_star_spectrum:
+        for asset_id in order:
+            bands.setdefault(asset_id, 3)
 
     prior_five: set[str] = set()
     external_five: set[str] = set()
@@ -254,25 +277,65 @@ def run_finals(
         [
             row["asset_id"]
             for row in ledger.decisions()
-            if row["asset_id"] in demoted and row.get("bucket") in ("five_star", "four_star")
+            if row["asset_id"] in demoted
+            and row.get("bucket") in _STAR_BUCKETS.values()
         ]
     )
 
+    rank_of = {asset_id: index + 1 for index, asset_id in enumerate(order)}
+    band_counts = {5: "five_star", 4: "four_star", 3: "three_star"}
     for asset_id, stars in bands.items():
         ledger.set_stars(asset_id, stars)
         ledger.set_decision(
             asset_id,
-            "five_star" if stars == 5 else "four_star",
-            {"stars": stars, "rank": order.index(asset_id) + 1},
+            band_counts[stars],
+            {"stars": stars, "rank": rank_of.get(asset_id, 0)},
         )
         if stars == 5:
             stats.five_star += 1
-        else:
+        elif stars == 4:
             stats.four_star += 1
+        else:
+            stats.three_star += 1
+
+    if settings.full_star_spectrum:
+        _star_the_middle(ledger, bands, stats)
 
     protected_note = f" ({stats.protected} kept by sticky five-star)" if stats.protected else ""
+    spectrum_note = (
+        f", {stats.three_star} at three, {stats.two_star} at two, {stats.one_star} at one"
+        if settings.full_star_spectrum
+        else ""
+    )
     emit(
         on_progress,
-        f"starred {stats.five_star} at five, {stats.four_star} at four{protected_note}",
+        f"starred {stats.five_star} at five, {stats.four_star} at four"
+        f"{spectrum_note}{protected_note}",
     )
     return stats
+
+
+def _star_the_middle(ledger: Ledger, bands: dict[str, int], stats: FinalsStats) -> None:
+    """Full-spectrum tail: 2 stars for ordinary keepers, 1 for poor-but-kept.
+
+    Uses only triage evidence — no extra API calls. Photos with any existing
+    decision (reject, non-photo, burst loser, or a band above) are skipped, as
+    is anything that is not a photograph.
+    """
+    decided = {str(row["asset_id"]) for row in ledger.decisions()}
+    for row in ledger.triage_rows():
+        asset_id = str(row["asset_id"])
+        if asset_id in bands or asset_id in decided or row.get("category") != "photo":
+            continue
+        score = int(row.get("technical_score") or 0)
+        stars = 2 if score >= 5 else 1
+        ledger.set_stars(asset_id, stars)
+        ledger.set_decision(
+            asset_id,
+            _STAR_BUCKETS[stars],
+            {"stars": stars, "from": "triage", "technical_score": score},
+        )
+        if stars == 2:
+            stats.two_star += 1
+        else:
+            stats.one_star += 1

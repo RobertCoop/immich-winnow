@@ -54,7 +54,22 @@ class Settings(BaseSettings):
 
     # --- stage 3: finals ---
     finals_rounds: int = 3
+    # Floor for how many top photos play Opus head-to-heads; grows
+    # automatically to twice the five-star target.
     finals_pool_size: int = 50
+
+    # --- star bands (fractions of the *scored candidate* pool) ---
+    # Five stars: Opus-refined crown. Four stars: next band, straight from
+    # the ranking evidence. On a library where ~8% of photos become
+    # candidates, the defaults work out to roughly the top 0.4% / next 1.2%
+    # of the whole library.
+    five_star_fraction: float = 0.05
+    four_star_fraction: float = 0.15
+    # Also assign 3 stars (remaining ranked candidates), 2 stars (ordinary
+    # keepers) and 1 star (poor but kept) — the full spectrum. Off by
+    # default: it rates nearly every photo, ending the "middle is untouched"
+    # guarantee, so switch it on deliberately.
+    full_star_spectrum: bool = False
 
     # --- thresholds ---
     candidate_score_min: int = 8

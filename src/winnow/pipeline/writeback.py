@@ -53,6 +53,9 @@ BUCKET_GROUPS: dict[str, str] = {
     "nonphoto": "nonphoto",
     "five_star": "stars",
     "four_star": "stars",
+    "three_star": "stars",
+    "two_star": "stars",
+    "one_star": "stars",
     "album": "stars",
     "burst_loser": "stacks",
     "burst_stack": "stacks",
@@ -184,6 +187,15 @@ def _action_for(
             bucket=bucket,
             description=f"rate {asset_id}: rating 4",
             api_ops=[_update_op(asset_id, rating=4)],
+        )
+    if bucket in ("three_star", "two_star", "one_star"):
+        stars = {"three_star": 3, "two_star": 2, "one_star": 1}[bucket]
+        return Action(
+            asset_id=asset_id,
+            burst_id=None,
+            bucket=bucket,
+            description=f"rate {asset_id}: rating {stars}",
+            api_ops=[_update_op(asset_id, rating=stars)],
         )
     return None
 
