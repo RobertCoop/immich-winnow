@@ -838,8 +838,10 @@ def test_plan_reject_action(finaled: FinalsStats, ledger: Ledger) -> None:
     action = next(a for a in writeback.plan(ledger) if a.bucket == "reject")
     assert action.asset_id == aid(4)
     assert action.group == "reject"
+    # Archive does the hiding; rating -1 rides along for servers that keep it
+    # (Immich v3.1 drops -1 silently).
     assert action.api_ops == [
-        {"op": "update_asset", "asset_id": aid(4), "rating": -1},
+        {"op": "update_asset", "asset_id": aid(4), "rating": -1, "visibility": "archive"},
         {"op": "tag", "asset_id": aid(4), "tag": "winnow/reject"},
     ]
 
@@ -948,7 +950,7 @@ def test_apply_live_sends_the_expected_asset_payloads(
         call.request.url.path.rsplit("/", 1)[-1]: json.loads(call.request.content)
         for call in immich_api["update_asset"].calls
     }
-    assert payloads[aid(4)] == {"rating": -1}
+    assert payloads[aid(4)] == {"rating": -1, "visibility": "archive"}
     assert payloads[aid(3)] == {"visibility": "archive"}
     assert payloads[aid(7)] == {"rating": 5, "isFavorite": True}
 

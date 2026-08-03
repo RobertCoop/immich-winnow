@@ -128,6 +128,10 @@ class ImmichClient:
         """Return the server's ``/server/about`` payload (includes ``version``)."""
         return self._json("GET", "/server/about")
 
+    def my_preferences(self) -> dict:
+        """Return the API-key user's preferences (``/users/me/preferences``)."""
+        return self._json("GET", "/users/me/preferences")
+
     # ------------------------------------------------------------------
     # assets
     # ------------------------------------------------------------------

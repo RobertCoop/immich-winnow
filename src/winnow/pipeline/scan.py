@@ -326,7 +326,9 @@ def run_scan(
                     "height": exif.get("exifImageHeight"),
                     "dhash": digest,
                     "thumb_path": str(path),
-                    "immich_rating": asset.get("rating"),
+                    # Immich v3 keeps the star rating on exifInfo; the top-level
+                    # field exists in the DTO but stays null even when rated.
+                    "immich_rating": exif.get("rating", asset.get("rating")),
                 }
             )
             scanned_ids.append(asset_id)

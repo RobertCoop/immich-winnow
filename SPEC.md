@@ -317,7 +317,11 @@ fences), retry-then-error, batch request construction.
 - `pipeline/writeback.py`: `plan(ledger) -> list[Action]`, `apply(settings, ledger,
   immich, buckets: set[str], dry_run: bool) -> ApplyStats`. Mapping:
   - nonphoto -> tag `winnow/screenshot` (or per-category), visibility archive
-  - reject -> rating -1 + tag `winnow/reject` (NO archive by default)
+  - reject -> archive + tag `winnow/reject` + best-effort rating -1
+    (LIVE FINDING: Immich v3.1.0 echoes rating=-1 in the PUT response but never
+    persists it — 1-5 persist fine, 0 is a 400. Archive is what actually hides
+    a reject; the -1 is forward compatibility. Ratings live at
+    asset.exifInfo.rating on read; the top-level rating field stays null.)
   - burst_loser -> tag `winnow/burst-loser`; stack group with winner primary
   - five_star -> rating 5 + isFavorite + tag `winnow/best`
   - four_star -> rating 4

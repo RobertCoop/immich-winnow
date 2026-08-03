@@ -550,7 +550,9 @@ def test_poll_ingests_finished_batches(
     assert result.exit_code == 0, plain(result.output)
     output = plain(result.stdout)
     assert re.search(r"singles judged\s+2", output)
-    assert "Estimated cost: $0.0220" in output
+    # Same tokens as the direct-mode test, but Batch API usage bills at 50%.
+    assert "Estimated cost: $0.0110" in output
+    assert "batch 50% off" in output
 
     with open_ledger(seeded) as ledger:
         assert len(ledger.triage_rows()) == 5
@@ -741,7 +743,7 @@ def test_apply_live_writes_to_immich(
     assert immich_api["tag_assets"].call_count == 1
     assert immich_api["update_asset"].call_count == 1
     body = json.loads(immich_api["update_asset"].calls[0].request.content)
-    assert body == {"rating": -1}
+    assert body == {"rating": -1, "visibility": "archive"}
 
     with open_ledger(seeded) as ledger:
         applied = [row["asset_id"] for row in ledger.decisions() if row["applied_at"]]

@@ -127,12 +127,19 @@ def _action_for(asset_id: str, bucket: str, detail: Any) -> Action | None:
     """Build the action for one decision, or ``None`` when it means 'do nothing'."""
     info = detail if isinstance(detail, dict) else {}
     if bucket == "reject":
+        # Archive is what actually hides the photo: Immich v3.1 accepts
+        # rating=-1 in the request DTO but silently drops it on write (1-5
+        # persist fine), so the rating is best-effort forward compatibility,
+        # not the mechanism.
         return Action(
             asset_id=asset_id,
             burst_id=None,
             bucket=bucket,
-            description=f"reject {asset_id}: rating -1 + tag {TAG_REJECT}",
-            api_ops=[_update_op(asset_id, rating=-1), _tag_op(asset_id, TAG_REJECT)],
+            description=f"reject {asset_id}: archive + tag {TAG_REJECT} (+ rating -1)",
+            api_ops=[
+                _update_op(asset_id, rating=-1, visibility="archive"),
+                _tag_op(asset_id, TAG_REJECT),
+            ],
         )
     if bucket == "nonphoto":
         category = str(info.get("category") or "")

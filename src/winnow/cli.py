@@ -97,8 +97,12 @@ def price_for(model: str) -> tuple[float, float] | None:
     return max(matches, key=lambda item: len(item[0]))[1]
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+def estimate_cost(
+    model: str, input_tokens: int, output_tokens: int, *, batch: bool = False
+) -> float | None:
     """Estimate the US-dollar cost of a stage's token usage.
+
+    Batch API usage is billed at 50% of the standard price.
 
     Returns:
         The estimate, or ``None`` when the model's price is unknown.
@@ -106,15 +110,17 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | 
     price = price_for(model)
     if price is None:
         return None
-    return input_tokens / 1_000_000 * price[0] + output_tokens / 1_000_000 * price[1]
+    cost = input_tokens / 1_000_000 * price[0] + output_tokens / 1_000_000 * price[1]
+    return cost / 2 if batch else cost
 
 
-def print_cost(model: str, stats: Any) -> None:
+def print_cost(model: str, stats: Any, *, batch: bool = False) -> None:
     """Print the estimated cost of a stage from its stats' token counters."""
     input_tokens = int(getattr(stats, "input_tokens", 0) or 0)
     output_tokens = int(getattr(stats, "output_tokens", 0) or 0)
-    usage = f"{input_tokens:,} in / {output_tokens:,} out · {model}"
-    cost = estimate_cost(model, input_tokens, output_tokens)
+    suffix = " · batch 50% off" if batch else ""
+    usage = f"{input_tokens:,} in / {output_tokens:,} out · {model}{suffix}"
+    cost = estimate_cost(model, input_tokens, output_tokens, batch=batch)
     if cost is None:
         console.print(f"[dim]Tokens used: {usage} (no price on file)[/dim]")
         return
@@ -313,6 +319,17 @@ def check() -> None:
         except ImmichError as exc:
             ok = False
             err_console.print(f"[bold red]FAIL[/bold red] Immich: {exc}")
+        else:
+            try:
+                prefs = immich.my_preferences()
+                if not (prefs.get("ratings") or {}).get("enabled", False):
+                    console.print(
+                        "[yellow]note[/yellow] Star ratings are hidden in your Immich UI "
+                        "(Account Settings → Features → Rating). Winnow still writes them; "
+                        "enable the toggle to see finalist stars."
+                    )
+            except Exception:
+                pass
 
     try:
         models = Anthropic(api_key=settings.anthropic_api_key).models.list()
@@ -406,7 +423,7 @@ def poll(
             stats = ingest_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
         model = ses.settings.triage_model
     print_stats("Ingested", stats)
-    print_cost(model, stats)
+    print_cost(model, stats, batch=True)
 
 
 @app.command()

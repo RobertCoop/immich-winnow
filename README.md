@@ -21,7 +21,7 @@ your library ──▶ 1. TRIAGE (Haiku)   every photo: category, quality, verdi
                  3. FINALS (Opus)    top pool plays Swiss-paired head-to-heads,
                      │                each pair judged twice with order swapped
                      ▼
-                 WRITE-BACK          rejects → rating −1 + tag · winners → ★★★★★
+                 WRITE-BACK          rejects → archive + tag · winners → ★★★★★
                                      + favorite · bursts → stacks · non-photos →
                                      archive. Nothing deleted, everything undoable.
 ```
@@ -103,7 +103,7 @@ bulk edit in the Immich UI over a tag's assets.
 
 | Bucket | Action | Undo |
 |---|---|---|
-| Confident rejects | rating −1 + tag `winnow/reject` | clear rating / untag |
+| Confident rejects | archived + tag `winnow/reject` (+ rating −1 on servers that persist it — Immich v3.1 silently drops −1) | unarchive / untag |
 | Confident non-photos — screenshots, documents, memes, and other (wallpapers, illustrations, renders) | archived + tag `winnow/screenshot`, `winnow/document`, `winnow/meme` or `winnow/other` | unarchive / untag |
 | Burst also-rans | stacked under the winner + tag `winnow/burst-loser` | un-stack / untag |
 | ★★★★★ finalists | rating 5 + favorite + tag `winnow/best` | clear rating / unfavorite / untag |
