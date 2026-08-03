@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from winnow.schemas import (
     BurstVerdict,
@@ -52,6 +52,38 @@ def test_output_schema_all_models():
         schema = output_schema(cls)
         assert schema.get("type") == "object"
         assert schema["additionalProperties"] is False
+
+
+def all_keys(node):
+    """Every dict key anywhere inside a schema."""
+    if isinstance(node, dict):
+        return set(node) | {k for v in node.values() for k in all_keys(v)}
+    if isinstance(node, list):
+        return {k for item in node for k in all_keys(item)}
+    return set()
+
+
+def test_output_schema_drops_defaults_and_titles():
+    class WithDefault(BaseModel):
+        a: int = 5
+        nested: list[str] = []
+
+    # unsupported keywords are a compile error at the structured-outputs API
+    keys = all_keys(output_schema(WithDefault))
+    assert "default" not in keys
+    assert "title" not in keys
+
+
+def test_output_schema_keeps_defaults_out_of_nested_definitions():
+    class Leaf(BaseModel):
+        value: str = "x"
+
+    class Root(BaseModel):
+        leaf: Leaf = Leaf()
+
+    schema = output_schema(Root)
+    assert "default" not in all_keys(schema)
+    assert schema["$defs"]["Leaf"]["additionalProperties"] is False
 
 
 def test_parse_verdict_plain():

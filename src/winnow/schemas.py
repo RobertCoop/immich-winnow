@@ -76,11 +76,23 @@ class PairVerdict(BaseModel):
     note: str
 
 
+#: Annotations pydantic emits that structured outputs has no use for. The API
+#: rejects unsupported keywords outright, so they are stripped rather than
+#: merely ignored.
+_DROPPED_KEYWORDS = ("default", "title")
+
+
 def _strictify(node: Any) -> None:
-    """Recursively set additionalProperties=false on all object schemas."""
+    """Recursively make a generated schema safe for structured outputs.
+
+    Every object node gets ``additionalProperties: false``, and the annotations
+    in :data:`_DROPPED_KEYWORDS` are removed wherever they appear.
+    """
     if isinstance(node, dict):
         if node.get("type") == "object":
             node.setdefault("additionalProperties", False)
+        for keyword in _DROPPED_KEYWORDS:
+            node.pop(keyword, None)
         for value in node.values():
             _strictify(value)
     elif isinstance(node, list):
@@ -92,7 +104,7 @@ def output_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
     """JSON schema for a verdict model, suitable for structured outputs.
 
     All object nodes get ``additionalProperties: false`` (required by the
-    API) and ``default`` annotations are dropped.
+    API), and ``default``/``title`` annotations are dropped.
     """
     schema = model_cls.model_json_schema()
     _strictify(schema)

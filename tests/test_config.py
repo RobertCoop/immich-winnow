@@ -35,3 +35,18 @@ def test_env_overrides(settings_env, monkeypatch):
     s = load_settings()
     assert s.bws_set_size == 6
     assert s.burst_gap_seconds == 5.5
+
+
+def test_env_example_documents_every_knob():
+    """Every setting must be discoverable in .env.example, or it may as well
+    not be configurable. Secrets are named there too, just unfilled."""
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text()
+    documented = {
+        line.lstrip("# ").split("=", 1)[0].strip()
+        for line in example.splitlines()
+        if "=" in line
+    }
+    missing = sorted(
+        name.upper() for name in Settings.model_fields if name.upper() not in documented
+    )
+    assert missing == [], f"undocumented settings: {missing}"

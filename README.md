@@ -22,8 +22,8 @@ your library ──▶ 1. TRIAGE (Haiku)   every photo: category, quality, verdi
                      │                each pair judged twice with order swapped
                      ▼
                  WRITE-BACK          rejects → rating −1 + tag · winners → ★★★★★
-                                     + favorite · bursts → stacks · screenshots →
-                                     archive. All reversible, all tagged.
+                                     + favorite · bursts → stacks · non-photos →
+                                     archive. Nothing deleted, everything undoable.
 ```
 
 Every judgment is stored in a local SQLite ledger, so runs are resumable,
@@ -41,10 +41,21 @@ end to end.
 
 ## Install
 
+### As a tool
+
+```bash
+uv tool install immich-winnow      # or: pipx install immich-winnow
+```
+
+That puts `winnow` on your PATH — drop the `uv run` prefix from every command
+below.
+
+### From source
+
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone <this repo> && cd winnow
+git clone https://github.com/robertcoop/immich-winnow && cd immich-winnow
 uv sync
 cp .env.example .env   # then fill in your keys
 ```
@@ -67,15 +78,18 @@ set sizes, thresholds).
 ```bash
 uv run winnow check                                  # verify both connections
 uv run winnow scan --after 2024-06-01 --before 2024-06-08
-uv run winnow triage                                 # stage 1 (add --batch for the 50%-off Batch API)
+uv run winnow triage --limit 50                      # try 50 photos first to sanity-check cost
+uv run winnow triage                                 # stage 1 (--direct is the default; --batch is 50% off)
 uv run winnow poll --ingest                          # if using --batch: fetch finished results
 uv run winnow rank                                   # stage 2
 uv run winnow finals                                 # stage 3
-uv run winnow report                                 # HTML contact sheet — review it!
-uv run winnow apply --dry-run                        # see exactly what would change
-uv run winnow apply --live --buckets reject,stars    # write back to Immich
+uv run winnow report --out winnow-report.html        # HTML contact sheet — review it!
+uv run winnow apply --dry-run                        # see exactly what would change (-v for the full list)
+uv run winnow apply --live --buckets reject,stars    # write back to Immich (asks first; -y to skip)
 uv run winnow status                                 # ledger summary any time
 ```
+
+`winnow --version` prints the version; every command takes `--help`.
 
 Start with a few days of photos to calibrate, then widen the date range.
 `scan`/`triage` are incremental — re-running with an overlapping range never
@@ -83,13 +97,21 @@ re-judges photos it has already seen.
 
 ## What gets written to Immich
 
+Every write-back is findable afterwards by filtering on the `winnow/*` tag it
+carries — that is the undo handle. Winnow has no `undo` command; undo is a
+bulk edit in the Immich UI over a tag's assets.
+
 | Bucket | Action | Undo |
 |---|---|---|
 | Confident rejects | rating −1 + tag `winnow/reject` | clear rating / untag |
-| Screenshots & documents | tag + archived | unarchive |
-| Burst also-rans | stacked under the winner + tag | un-stack |
-| Finalists | ★★★★ / ★★★★★ + favorite + tag `winnow/best` | clear |
+| Confident non-photos — screenshots, documents, memes, and other (wallpapers, illustrations, renders) | archived + tag `winnow/screenshot`, `winnow/document`, `winnow/meme` or `winnow/other` | unarchive / untag |
+| Burst also-rans | stacked under the winner + tag `winnow/burst-loser` | un-stack / untag |
+| ★★★★★ finalists | rating 5 + favorite + tag `winnow/best` | clear rating / unfavorite / untag |
+| ★★★★ finalists | rating 4 (no tag — they are indistinguishable from your own 4-star ratings) | clear rating |
 | Everything else | untouched | — |
+
+Both destructive-looking buckets need a **high-confidence** verdict: an unsure
+reject or an unsure "that's a meme" stays in the untouched middle.
 
 ## Design notes
 
