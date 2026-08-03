@@ -112,16 +112,50 @@ cp .env.example .env   # then fill in your keys
 
 ## Configure
 
-`.env` (never committed):
+Winnow is configured entirely through environment variables (a local `.env`
+file works too — never commit it).
 
-```ini
-IMMICH_URL=http://your-immich:2283
-IMMICH_API_KEY=...     # Immich → Account Settings → API Keys
-ANTHROPIC_API_KEY=...  # console.anthropic.com
-```
+### Required
 
-See `.env.example` for optional knobs (models per stage, burst sensitivity,
-set sizes, thresholds).
+| Variable | Where to get it |
+|---|---|
+| `IMMICH_URL` | Your Immich base URL, e.g. `http://192.168.1.10:2283` — no trailing `/api`. Inside a compose stack, use the service name: `http://immich-server:2283`. |
+| `IMMICH_API_KEY` | Immich → **Account Settings → API Keys → New API Key**. Select **All** permissions (or at minimum: read/update assets and thumbnails, manage tags, albums, and stacks — Winnow writes ratings, tags, favorites, archives, stacks, and one album). |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → API Keys. |
+
+### Common tuning knobs (defaults shown)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TRIAGE_MODEL` | `claude-haiku-4-5` | Stage-1 judge (every photo). |
+| `RANK_MODEL` | `claude-sonnet-5` | Stage-2 judge (best-worst sets). |
+| `FINALS_MODEL` | `claude-opus-5` | Stage-3 judge (head-to-head finals). |
+| `DB_PATH` | `winnow.db` | The SQLite ledger — Winnow's memory. Keep it; back it up. |
+| `CACHE_DIR` | `.winnow-cache` | Resized thumbnails (~120 KB per photo). |
+| `CANDIDATE_SCORE_MIN` | `8` | Triage score floor for entering stage 2. Lower = rank more photos. |
+| `SCORING_LIMIT` | `0` | Max already-scored photos re-judged as ranking anchors per run (new photos always score). `0` = unlimited. |
+| `BEST_ALBUM` | `Five-Stars` | Album that collects your best photos. `""` disables. |
+| `BEST_ALBUM_MIN_STARS` | `5` | `4` also pulls the four-star band into the album. |
+| `FIVE_STAR_FAVORITE` | `true` | Also mark five-star photos as Immich favorites. |
+| `BURST_GAP_SECONDS` | `10` | Max seconds between frames judged as one burst. |
+| `IMAGE_EDGE` | `768` | Long edge (px) of what the judges see. |
+
+### Command flags as env vars (`WINNOW_*`)
+
+Every CLI flag doubles as an env var, which keeps compose files declarative.
+The ones you're most likely to set on the watcher service:
+
+| Variable | Default | Flag equivalent |
+|---|---|---|
+| `WINNOW_EVERY` | `7d` | `watch --every` — cycle cadence (`30m`, `6h`, `7d`, `1w`). |
+| `WINNOW_WINDOW_DAYS` | `0` | `--window-days` — `0` sweeps the whole library every cycle. |
+| `WINNOW_APPLY` | `true` for `watch`/`run`, `false` elsewhere | `--apply` — write decisions to Immich immediately. |
+| `WINNOW_BATCH` | `true` for `watch`/`run`, `false` for `triage` | `--batch` — 50%-off Batch API triage. |
+| `WINNOW_ALLOW_DEMOTIONS` | `false` | `finals --allow-demotions` — let re-ranking take five stars away. |
+
+The complete list of every knob lives in [.env.example](.env.example) and,
+with comments, in [docker-compose.yml](docker-compose.yml); `winnow
+<command> --help` shows the env var for every flag.
 
 ## Use
 
