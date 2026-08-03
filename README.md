@@ -47,8 +47,8 @@ Winnow ships as a headless container image, deployed the same way as
 [immich-power-tools](https://github.com/immich-power-tools/immich-power-tools):
 add one service to the compose stack you already run, reusing its `.env`.
 There's no web UI and no port. By default the service **stays running and
-sweeps your whole library once a week** (`winnow watch`): scan, judge, rank,
-apply, refresh the report, sleep. Every stage is incremental, so photos it has
+sweeps your whole library once a week** (`winnow watch`): scan, judge (via
+the 50%-off Batch API by default), rank, apply, refresh the report, sleep. Every stage is incremental, so photos it has
 already judged cost nothing — each cycle only spends on what's new, and even
 backdated imports are picked up because the sweep re-enumerates everything.
 
@@ -125,15 +125,23 @@ set sizes, thresholds).
 
 ## Use
 
+One command does everything:
+
+```bash
+uv run winnow run          # scan whole library → batch triage (waits) → rank → finals → apply → report
+uv run winnow run --no-apply --after 2024-06-01    # review-first, windowed variant
+```
+
+Or stage by stage:
+
 ```bash
 uv run winnow check                                  # verify both connections
 uv run winnow scan --after 2024-06-01 --before 2024-06-08
 uv run winnow triage --limit 50                      # try 50 photos first to sanity-check cost
-uv run winnow triage                                 # stage 1 (--direct is the default; --batch is 50% off)
-uv run winnow poll --ingest                          # if using --batch: fetch finished results
+uv run winnow triage --batch --wait                  # stage 1 at 50% off; --wait ingests as batches finish
+uv run winnow poll --wait                            # or wait separately (one-shot check: poll --ingest)
 uv run winnow rank                                   # stage 2 (--limit caps re-judged anchors)
 uv run winnow finals                                 # stage 3 (--allow-demotions to un-stick five-stars)
-uv run winnow watch --once                           # one full sweep: scan+judge+rank+apply+report
 uv run winnow report --out winnow-report.html        # HTML contact sheet — review it!
 uv run winnow apply --dry-run                        # see exactly what would change (-v for the full list)
 uv run winnow apply --live --buckets reject,stars    # write back to Immich (asks first; -y to skip)

@@ -83,7 +83,8 @@ services:
       # WINNOW_WINDOW_DAYS: "0"          # 0 = full-library sweep each cycle
       # WINNOW_APPLY: "true"             # watch writes back each cycle (false = review-first)
       # WINNOW_ALLOW_DEMOTIONS: "false"  # let re-ranking take five stars away
-      # WINNOW_BATCH: "false"            # triage via the 50%-off Batch API
+      # WINNOW_BATCH: "true"             # watcher triages via the 50%-off Batch API
+      # WINNOW_WAIT: "false"             # make one-off triage/poll commands block until ingested
       # (see `winnow <command> --help` for the rest: WINNOW_AFTER, WINNOW_BEFORE,
       #  WINNOW_LIMIT, WINNOW_BUCKETS, WINNOW_LIVE, WINNOW_YES, ...)
     volumes:

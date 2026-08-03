@@ -274,6 +274,13 @@ def _stub_watch_stages(monkeypatch, calls, rank_kwargs, scan_args):
         calls.append("triage")
         return TriageStats()
 
+    def submit(settings, ledger, judge, limit, on_progress=None):
+        calls.append("triage-batch")
+        return None  # nothing pending; the wait loop then has nothing to do
+
+    def wait(ses, **kwargs):
+        calls.append("wait")
+
     def rank(settings, ledger, judge, *, limit=None, on_progress=None):
         calls.append("rank")
         rank_kwargs["limit"] = limit
@@ -289,6 +296,8 @@ def _stub_watch_stages(monkeypatch, calls, rank_kwargs, scan_args):
 
     monkeypatch.setattr(cli_mod, "run_scan", scan)
     monkeypatch.setattr(cli_mod, "run_triage_direct", triage)
+    monkeypatch.setattr(cli_mod, "submit_triage_batch", submit)
+    monkeypatch.setattr(cli_mod, "_wait_for_batches", wait)
     monkeypatch.setattr(cli_mod, "run_rank", rank)
     monkeypatch.setattr(cli_mod, "run_finals", finals)
     monkeypatch.setattr(cli_mod.writeback, "apply", apply_stub)
@@ -307,7 +316,8 @@ def test_watch_once_chains_scan_judge_rank_finals_apply_report(settings_env, mon
         cli_mod.app, ["watch", "--once", "--scoring-limit", "7"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
-    assert calls == ["scan", "triage", "rank", "finals", "apply"]
+    # batch triage is the watcher's default — half price, and it can wait
+    assert calls == ["scan", "triage-batch", "wait", "rank", "finals", "apply"]
     assert rank_kwargs["limit"] == 7
     # default full sweep: every new photo is picked up, even backdated imports
     assert scan_args["after"] == "1970-01-01"
@@ -321,11 +331,12 @@ def test_watch_once_no_apply_and_window(settings_env, monkeypatch):
 
     result = CliRunner().invoke(
         cli_mod.app,
-        ["watch", "--once", "--no-apply", "--window-days", "14"],
+        ["watch", "--once", "--no-apply", "--window-days", "14", "--direct"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert "apply" not in calls
+    assert "triage" in calls  # --direct switches off batch triage
     assert scan_args["after"] != "1970-01-01"
 
 
@@ -354,3 +365,80 @@ def test_watch_options_come_from_environment(settings_env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "apply" not in calls  # WINNOW_APPLY=false respected
     assert scan_args["after"] != "1970-01-01"  # WINNOW_WINDOW_DAYS respected
+
+
+def test_run_command_is_one_full_pass(settings_env, monkeypatch):
+    calls: list[str] = []
+    rank_kwargs: dict = {}
+    scan_args: dict = {}
+    _stub_watch_stages(monkeypatch, calls, rank_kwargs, scan_args)
+
+    result = CliRunner().invoke(cli_mod.app, ["run"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert calls == ["scan", "triage-batch", "wait", "rank", "finals", "apply"]
+    assert scan_args["after"] == "1970-01-01"  # whole library by default
+
+
+def test_run_command_accepts_window_and_review_mode(settings_env, monkeypatch):
+    calls: list[str] = []
+    rank_kwargs: dict = {}
+    scan_args: dict = {}
+    _stub_watch_stages(monkeypatch, calls, rank_kwargs, scan_args)
+
+    result = CliRunner().invoke(
+        cli_mod.app,
+        ["run", "--after", "2024-06-01", "--before", "2024-07-01", "--direct", "--no-apply"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == ["scan", "triage", "rank", "finals"]
+    assert scan_args == {"after": "2024-06-01", "before": "2024-07-01"}
+
+
+def test_wait_for_batches_polls_then_ingests(settings_env, monkeypatch):
+    from types import SimpleNamespace
+
+    open_sequence = [
+        [{"batch_id": "b1"}],  # first look: still processing
+        [{"batch_id": "b1"}],  # second look: ended -> ingest
+        [],  # done
+    ]
+    ledger = SimpleNamespace(open_batches=lambda: open_sequence.pop(0))
+    ses = SimpleNamespace(
+        ledger=ledger,
+        claude=SimpleNamespace(client=object()),
+        settings=load_settings(),
+    )
+    statuses = iter(["in_progress", "ended"])
+    sleeps: list[float] = []
+    ingested: list[str] = []
+    monkeypatch.setattr(cli_mod, "batch_status", lambda client, bid: next(statuses))
+    monkeypatch.setattr(
+        cli_mod,
+        "ingest_triage_batch",
+        lambda *a, **k: (ingested.append("yes"), TriageStats())[1],
+    )
+    monkeypatch.setattr(cli_mod.time, "sleep", sleeps.append)
+
+    cli_mod._wait_for_batches(ses, interval=5.0)
+    assert ingested == ["yes"]
+    assert sleeps == [5.0]
+
+
+def test_poll_wait_blocks_until_ingested(settings_env, monkeypatch):
+    from winnow.config import load_settings as _ls
+
+    settings = _ls()
+    ledger = Ledger(settings.db_path)
+    ledger.add_batch("b1", "triage", {})
+    ledger.close()
+
+    waited: list[bool] = []
+    monkeypatch.setattr(cli_mod, "batch_status", lambda client, bid: "ended")
+    monkeypatch.setattr(
+        cli_mod, "_wait_for_batches", lambda ses, **kwargs: waited.append(True)
+    )
+    result = CliRunner().invoke(cli_mod.app, ["poll", "--wait"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert waited == [True]
+    assert "All batches ingested" in result.output

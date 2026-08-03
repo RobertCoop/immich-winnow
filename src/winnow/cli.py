@@ -371,6 +371,44 @@ def _apply_now(ses: Session, groups: set[str]) -> None:
     print_stats("Write-back", stats, skip=("actions",))
 
 
+#: Seconds between Batch API status checks while ``--wait``-ing.
+BATCH_POLL_INTERVAL = 30.0
+
+
+def _wait_for_batches(
+    ses: Session, *, interval: float = BATCH_POLL_INTERVAL, apply_now: bool = False
+) -> None:
+    """Block until every open batch has ended, ingesting each as it finishes.
+
+    Safe to interrupt: already-ingested chunks are recorded, and a later
+    ``winnow poll --ingest`` (or another ``--wait``) picks up the rest.
+    """
+    while True:
+        open_batches = ses.ledger.open_batches()
+        if not open_batches:
+            return
+        ended = 0
+        for row in open_batches:
+            try:
+                if batch_status(ses.claude.client, str(row["batch_id"])) == "ended":
+                    ended += 1
+            except Exception:  # a status probe must never abort the wait
+                continue
+        if ended:
+            with progress_reporter("Ingesting") as report:
+                stats = ingest_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
+            print_stats("Ingested", stats)
+            print_cost(ses.settings.triage_model, stats, batch=True)
+            if apply_now:
+                _apply_now(ses, {"reject", "nonphoto", "stacks"})
+            continue
+        console.print(
+            f"[dim]{len(open_batches)} batch(es) still processing; "
+            f"next check in {int(interval)}s…[/dim]"
+        )
+        time.sleep(interval)
+
+
 @app.command()
 def triage(
     batch: Annotated[
@@ -394,22 +432,39 @@ def triage(
             "skipping the separate review-then-apply step.",
         ),
     ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            envvar="WINNOW_WAIT",
+            help="With --batch: stay running, ingest results as each batch "
+            "finishes, and only exit when everything has landed.",
+        ),
+    ] = False,
 ) -> None:
     """Stage 1 — judge every photo, settling bursts with one call each."""
     with session(immich=apply_now, judge=True) as ses:
         if batch:
-            if apply_now:
+            if apply_now and not wait:
                 console.print(
-                    "[yellow]--apply does nothing with --batch; "
-                    "use it on `winnow poll --ingest` instead.[/yellow]"
+                    "[yellow]--apply without --wait does nothing here; "
+                    "use `winnow poll --ingest --apply` later, or add --wait.[/yellow]"
                 )
             with progress_reporter("Queueing") as report:
                 batch_id = submit_triage_batch(ses.settings, ses.ledger, ses.claude, limit, report)
-            if batch_id is None:
+            if batch_id is None and not ses.ledger.open_batches():
                 console.print("Nothing left to triage.")
                 return
-            console.print(f"Submitted batch [bold]{batch_id}[/bold].")
-            console.print("Check on it with [bold]winnow poll[/bold], then [bold]--ingest[/bold].")
+            if batch_id is not None:
+                console.print(f"Submitted batch [bold]{batch_id}[/bold].")
+            if wait:
+                _wait_for_batches(ses, apply_now=apply_now)
+                console.print("[green]All batches ingested.[/green]")
+            else:
+                console.print(
+                    "Check on it with [bold]winnow poll[/bold], then [bold]--ingest[/bold] "
+                    "(or re-run with [bold]--wait[/bold])."
+                )
             return
 
         with progress_reporter("Triaging") as report:
@@ -436,9 +491,17 @@ def poll(
             help="After ingesting, write reject/non-photo/stack changes to Immich immediately.",
         ),
     ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            envvar="WINNOW_WAIT",
+            help="Stay running and ingest every batch as it finishes, then exit.",
+        ),
+    ] = False,
 ) -> None:
     """Show open Batch API jobs, and optionally ingest the finished ones."""
-    with session(immich=apply_now and ingest, judge=True) as ses:
+    with session(immich=apply_now and (ingest or wait), judge=True) as ses:
         open_batches = ses.ledger.open_batches()
         if not open_batches:
             console.print("No open batches.")
@@ -463,8 +526,16 @@ def poll(
             )
         console.print(table)
 
+        if wait:
+            _wait_for_batches(ses, apply_now=apply_now)
+            console.print("[green]All batches ingested.[/green]")
+            return
+
         if not ingest:
-            console.print("[dim]Re-run with --ingest once a batch has ended.[/dim]")
+            console.print(
+                "[dim]Re-run with --ingest once a batch has ended, "
+                "or with --wait to block until everything lands.[/dim]"
+            )
             return
 
         with progress_reporter("Ingesting") as report:
@@ -674,6 +745,104 @@ def parse_every(text: str) -> float:
     return value * multiplier
 
 
+def _run_cycle(
+    *,
+    after: str,
+    before: str,
+    batch: bool,
+    apply_changes: bool,
+    scoring_limit: int | None,
+) -> None:
+    """One full pass: scan → triage → rank → finals → apply → report."""
+    with session(immich=True, judge=True) as ses:
+        cap = ses.settings.scoring_limit if scoring_limit is None else scoring_limit
+        with progress_reporter("Scanning") as report:
+            run_scan(ses.settings, ses.ledger, ses.api, after, before, on_progress=report)
+        if batch:
+            with progress_reporter("Queueing") as report:
+                batch_id = submit_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
+            if batch_id is not None:
+                console.print(f"Submitted triage batch [bold]{batch_id}[/bold]; waiting…")
+            _wait_for_batches(ses)
+        else:
+            with progress_reporter("Triaging") as report:
+                t_stats = run_triage_direct(ses.settings, ses.ledger, ses.claude, None, report)
+            print_cost(ses.settings.triage_model, t_stats)
+        with progress_reporter("Ranking") as report:
+            r_stats = run_rank(
+                ses.settings, ses.ledger, ses.claude, limit=cap or None, on_progress=report
+            )
+        print_cost(ses.settings.rank_model, r_stats)
+        with progress_reporter("Finals") as report:
+            f_stats = run_finals(ses.settings, ses.ledger, ses.claude, on_progress=report)
+        print_cost(ses.settings.finals_model, f_stats)
+        if apply_changes:
+            _apply_now(ses, set(parse_buckets(DEFAULT_BUCKETS)))
+        report_path = write_html_report(
+            ses.ledger, ses.settings.cache_dir, Path("winnow-report.html")
+        )
+        console.print(f"[dim]Report refreshed: {report_path}[/dim]")
+
+
+@app.command()
+def run(
+    after: Annotated[
+        str | None,
+        typer.Option(
+            "--after",
+            envvar="WINNOW_AFTER",
+            help="Start of the window, YYYY-MM-DD (default: the beginning of time).",
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option(
+            "--before",
+            envvar="WINNOW_BEFORE",
+            help="End of the window, YYYY-MM-DD (default: tomorrow).",
+        ),
+    ] = None,
+    batch: Annotated[
+        bool,
+        typer.Option(
+            "--batch/--direct",
+            envvar="WINNOW_BATCH",
+            help="Triage via the 50%-cheaper Batch API (default), waiting for results.",
+        ),
+    ] = True,
+    apply_changes: Annotated[
+        bool,
+        typer.Option(
+            "--apply/--no-apply",
+            envvar="WINNOW_APPLY",
+            help="Write every decision to Immich at the end (default). "
+            "--no-apply leaves them for a reviewed `winnow apply`.",
+        ),
+    ] = True,
+    scoring_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--scoring-limit",
+            envvar="WINNOW_SCORING_LIMIT",
+            help="Max already-scored photos re-judged as ranking anchors "
+            "(SCORING_LIMIT setting; 0 = unlimited).",
+        ),
+    ] = None,
+) -> None:
+    """The whole pipeline in one shot: scan → triage → rank → finals → apply → report."""
+    started = datetime.now(UTC)
+    window_after = after or "1970-01-01"
+    window_before = before or (started + timedelta(days=1)).date().isoformat()
+    heading(f"Full run — window {window_after} → {window_before}")
+    _run_cycle(
+        after=window_after,
+        before=window_before,
+        batch=batch,
+        apply_changes=apply_changes,
+        scoring_limit=scoring_limit,
+    )
+
+
 @app.command()
 def watch(
     every: Annotated[
@@ -681,6 +850,15 @@ def watch(
             "--every", envvar="WINNOW_EVERY", help="How often to run a cycle: 30m, 6h, 7d, 1w."
         )
     ] = "7d",
+    batch: Annotated[
+        bool,
+        typer.Option(
+            "--batch/--direct",
+            envvar="WINNOW_BATCH",
+            help="Triage via the 50%-cheaper Batch API (default) — an unattended "
+            "watcher never minds waiting for the discount.",
+        ),
+    ] = True,
     window_days: Annotated[
         int,
         typer.Option(
@@ -732,28 +910,13 @@ def watch(
             after = "1970-01-01"
         before = (cycle_start + timedelta(days=1)).date().isoformat()
         heading(f"Cycle {cycle_start:%Y-%m-%d %H:%M} — window {after} → {before}")
-
-        with session(immich=True, judge=True) as ses:
-            cap = ses.settings.scoring_limit if scoring_limit is None else scoring_limit
-            with progress_reporter("Scanning") as report:
-                run_scan(ses.settings, ses.ledger, ses.api, after, before, on_progress=report)
-            with progress_reporter("Triaging") as report:
-                t_stats = run_triage_direct(ses.settings, ses.ledger, ses.claude, None, report)
-            print_cost(ses.settings.triage_model, t_stats)
-            with progress_reporter("Ranking") as report:
-                r_stats = run_rank(
-                    ses.settings, ses.ledger, ses.claude, limit=cap or None, on_progress=report
-                )
-            print_cost(ses.settings.rank_model, r_stats)
-            with progress_reporter("Finals") as report:
-                f_stats = run_finals(ses.settings, ses.ledger, ses.claude, on_progress=report)
-            print_cost(ses.settings.finals_model, f_stats)
-            if apply_changes:
-                _apply_now(ses, set(parse_buckets(DEFAULT_BUCKETS)))
-            report_path = write_html_report(
-                ses.ledger, ses.settings.cache_dir, Path("winnow-report.html")
-            )
-            console.print(f"[dim]Report refreshed: {report_path}[/dim]")
+        _run_cycle(
+            after=after,
+            before=before,
+            batch=batch,
+            apply_changes=apply_changes,
+            scoring_limit=scoring_limit,
+        )
 
         if once:
             return
