@@ -168,6 +168,14 @@ class ImmichClient:
             next_page = bucket.get("nextPage")
             if not next_page:
                 return
+            # Immich returns nextPage as a *string* (e.g. "2") but validates
+            # the request's `page` as a number — echoing it back verbatim 400s.
+            try:
+                next_page = int(next_page)
+            except (TypeError, ValueError) as exc:
+                raise ImmichError(
+                    f"search/metadata returned an unusable nextPage cursor: {next_page!r}"
+                ) from exc
             if next_page == page:
                 raise ImmichError(f"search/metadata repeated page cursor {page!r}")
             page = next_page

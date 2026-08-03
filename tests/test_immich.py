@@ -156,9 +156,11 @@ def test_search_assets_paginates_two_pages(
     assert body_of(route, 1)["page"] == 2
 
 
-def test_search_assets_passes_string_next_page_verbatim(
+def test_search_assets_coerces_string_next_page_to_number(
     mock_api: respx.MockRouter, client: ImmichClient
 ) -> None:
+    # Immich v3.1 really does return nextPage as a string ("2"), and really
+    # does 400 if the next request's `page` is not a number — coerce, never echo.
     route = mock_api.post("/search/metadata").mock(
         side_effect=[
             httpx.Response(200, json={"assets": {"items": [asset("a1")], "nextPage": "2"}}),
@@ -166,7 +168,19 @@ def test_search_assets_passes_string_next_page_verbatim(
         ]
     )
     assert [a["id"] for a in client.search_assets("A", "B")] == ["a1"]
-    assert body_of(route, 1)["page"] == "2"
+    assert body_of(route, 1)["page"] == 2
+
+
+def test_search_assets_rejects_garbage_next_page(
+    mock_api: respx.MockRouter, client: ImmichClient
+) -> None:
+    mock_api.post("/search/metadata").mock(
+        return_value=httpx.Response(
+            200, json={"assets": {"items": [asset("a1")], "nextPage": "not-a-number"}}
+        )
+    )
+    with pytest.raises(ImmichError, match="nextPage"):
+        list(client.search_assets("A", "B"))
 
 
 def test_search_assets_default_page_size(mock_api: respx.MockRouter, client: ImmichClient) -> None:
