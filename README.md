@@ -43,27 +43,29 @@ end to end.
 
 ### Docker, alongside your Immich stack (recommended for servers)
 
-Winnow ships as a headless container image, deployed the same way as
-[immich-power-tools](https://github.com/immich-power-tools/immich-power-tools):
-add one service to the compose stack you already run, reusing its `.env`.
-There's no web UI and no port. By default the service **stays running and
-sweeps your whole library once a week** (`winnow watch`): scan, judge (via
-the 50%-off Batch API by default), rank, apply, refresh the report, sleep. Every stage is incremental, so photos it has
-already judged cost nothing — each cycle only spends on what's new, and even
-backdated imports are picked up because the sweep re-enumerates everything.
+Winnow ships as a headless container image (amd64/arm64), deployed the same
+way as [immich-power-tools](https://github.com/immich-power-tools/immich-power-tools):
+one service added to the compose stack you already run. No web UI, no port.
+
+**1. Add the service** to your Immich `docker-compose.yml`:
 
 ```yaml
 services:
   # ...your immich services...
   winnow:
     container_name: immich_winnow
-    image: ghcr.io/robertcoop/immich-winnow:latest
-    command: ["watch"]            # weekly unattended cycle (see below)
+    image: ghcr.io/robertcoop/immich-winnow:latest   # or pin a version tag
+    command: ["watch"]            # stay running; weekly unattended cycle
     restart: unless-stopped
     env_file:
       - .env                      # reuse the Immich stack's .env
     environment:
-      IMMICH_URL: http://immich-server:2283   # Immich by compose service name
+      # Reach Immich by its compose service name (adjust if yours differs):
+      IMMICH_URL: http://immich-server:2283
+      # Optional watcher tuning — every CLI flag has a WINNOW_* env var:
+      # WINNOW_EVERY: "7d"        # cycle cadence: 30m, 6h, 7d, 1w
+      # WINNOW_APPLY: "false"     # review-first: judge but don't write back
+      # SCORING_LIMIT: "500"      # cap re-judged ranking anchors per cycle
     volumes:
       - immich-winnow-data:/data  # ledger, thumbnail cache, reports
 
@@ -71,24 +73,55 @@ volumes:
   immich-winnow-data:
 ```
 
-Add two lines to the stack's `.env` (`IMMICH_API_KEY=...`,
-`ANTHROPIC_API_KEY=...`) and `docker compose up -d winnow`. Heads-up: the
-first cycle on a fresh ledger processes your entire library. Tune with e.g.
-`command: ["watch", "--every", "3d", "--scoring-limit", "500"]`, keep a
-human in the loop with `["watch", "--no-apply"]`, or park the watcher by
-adding `profiles: ["winnow"]`.
+**2. Add two keys** to the stack's `.env` (see [Configure](#configure) for
+details, including the Immich API-key permissions):
 
-One-off commands work any time, watcher or not:
+```ini
+IMMICH_API_KEY=...      # Immich → Account Settings → API Keys (All permissions)
+ANTHROPIC_API_KEY=...   # console.anthropic.com
+```
+
+**3. Verify, then trial-run on a small window** before letting it loose:
 
 ```bash
 docker compose run --rm winnow check
-docker compose run --rm winnow scan --after 2024-06-01 --before 2024-07-01
-docker compose run --rm winnow triage --batch
-# ...and so on; every CLI command below works the same way.
+docker compose run --rm winnow run --no-apply --after 2024-06-01 --before 2024-06-08
+# grab the report off the volume:
+docker run --rm -v immich-winnow-data:/data -v "$PWD":/out alpine \
+  cp /data/winnow-report.html /out/
 ```
 
-The ledger and reports persist on the `immich-winnow-data` volume (mount a
-host directory instead if you want the HTML report easy to open). A sample
+Review the report, then apply with
+`docker compose run --rm winnow apply --live` — or skip straight to step 4
+and let the watcher apply as it goes.
+
+**4. Start the watcher:**
+
+```bash
+docker compose up -d winnow
+```
+
+By default it **sweeps your whole library once a week**: scan, judge (via
+the 50%-off Batch API), rank, apply, refresh the report, sleep. Every stage
+is incremental — already-judged photos cost nothing, and backdated imports
+are always picked up because each cycle re-enumerates the library. Heads-up:
+the first cycle on a fresh ledger processes everything, which for a big
+library means a few dollars and a few hours.
+
+Prefer a human in the loop? `WINNOW_APPLY: "false"` (or
+`command: ["watch", "--no-apply"]`) makes the watcher judge-only; you apply
+after reviewing. To park the watcher entirely, add `profiles: ["winnow"]`
+and use one-off commands only — they work any time, watcher or not:
+
+```bash
+docker compose run --rm winnow status
+docker compose run --rm winnow triage --batch --wait --apply
+# ...every CLI command below works the same way.
+```
+
+The ledger and reports persist on the `immich-winnow-data` volume; bind-mount
+a host directory instead (`- ./winnow-data:/data`) if you want
+`winnow-report.html` easy to open. A fully commented sample
 [docker-compose.yml](docker-compose.yml) ships in this repo.
 
 ### As a tool
