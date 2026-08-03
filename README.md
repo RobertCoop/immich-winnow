@@ -130,6 +130,49 @@ a host directory instead (`- ./winnow-data:/data`) if you want
 `winnow-report.html` easy to open. A fully commented sample
 [docker-compose.yml](docker-compose.yml) ships in this repo.
 
+#### Multiple users on one server
+
+An Immich API key is bound to a single user, and ratings, favorites, tags,
+and albums are all per-user — so partner sharing does **not** let one Winnow
+instance grade two libraries. Run one service per person instead; only the
+Anthropic key is shared (it's just billing):
+
+```yaml
+services:
+  winnow-alice:
+    container_name: immich_winnow_alice
+    image: ghcr.io/robertcoop/immich-winnow:latest
+    command: ["watch"]
+    restart: unless-stopped
+    environment:
+      IMMICH_URL: http://immich-server:2283
+      IMMICH_API_KEY: ${ALICE_IMMICH_API_KEY}   # Alice's own key
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}   # shared is fine
+    volumes:
+      - winnow-alice-data:/data                 # separate ledger per person
+
+  winnow-bob:
+    container_name: immich_winnow_bob
+    image: ghcr.io/robertcoop/immich-winnow:latest
+    command: ["watch"]
+    restart: unless-stopped
+    environment:
+      IMMICH_URL: http://immich-server:2283
+      IMMICH_API_KEY: ${BOB_IMMICH_API_KEY}     # Bob's own key
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - winnow-bob-data:/data
+
+volumes:
+  winnow-alice-data:
+  winnow-bob-data:
+```
+
+Each person gets their own verdicts, stars, and `Five-Stars` album in their
+own account. If both keep copies of the same photos, each instance judges its
+own copy — a little double spend on the overlap, unavoidable since no API key
+can see across the account boundary.
+
 ### As a tool
 
 ```bash
