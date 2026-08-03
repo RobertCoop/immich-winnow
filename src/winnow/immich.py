@@ -291,6 +291,40 @@ class ImmichClient:
         """Remove a stack (its assets stay in the library)."""
         self._request("DELETE", f"/stacks/{stack_id}")
 
+    # ------------------------------------------------------------------
+    # albums
+    # ------------------------------------------------------------------
+    def list_albums(self) -> list[dict]:
+        """Return every album DTO the API key can see."""
+        return self._json("GET", "/albums")
+
+    def create_album(self, name: str, asset_ids: list[str] | None = None) -> dict:
+        """Create an album, optionally seeding it with assets."""
+        payload: dict[str, Any] = {"albumName": name}
+        if asset_ids:
+            payload["assetIds"] = list(asset_ids)
+        return self._json("POST", "/albums", json=payload)
+
+    def add_album_assets(self, album_id: str, asset_ids: list[str]) -> list[dict]:
+        """Add assets to an album; already-present assets report as duplicates,
+        which Immich treats as success-shaped results, so the call is idempotent."""
+        return self._json("PUT", f"/albums/{album_id}/assets", json={"ids": list(asset_ids)})
+
+    def upsert_album(self, name: str) -> str:
+        """Return the id of the album named ``name``, creating it if needed.
+
+        Matches on exact ``albumName``; if several albums share the name, the
+        first one the API returns wins.
+        """
+        for dto in self.list_albums():
+            if str(dto.get("albumName") or "") == name:
+                return str(dto["id"])
+        return str(self.create_album(name)["id"])
+
+    def delete_album(self, album_id: str) -> None:
+        """Delete an album (its assets stay in the library)."""
+        self._request("DELETE", f"/albums/{album_id}")
+
 
 def _match_tags(names: Sequence[str], dtos: Any) -> dict[str, str]:
     """Map requested tag names to ids from a list of tag DTOs.

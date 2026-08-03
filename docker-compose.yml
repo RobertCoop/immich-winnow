@@ -1,16 +1,23 @@
 # Reference service block for running Winnow inside your Immich compose stack,
-# mirroring how immich-power-tools is deployed. Winnow is headless: it does not
-# stay running — you invoke commands with `docker compose run`.
+# mirroring how immich-power-tools is deployed. Winnow is headless (no UI, no
+# port). By default the service stays running and does a fully unattended
+# weekly pass over the last 30 days of photos — scan, judge, rank, apply —
+# then sleeps ('winnow watch'). Every stage is incremental, so a cycle with
+# nothing new costs nothing.
 #
 # Add the `winnow` service to your existing Immich docker-compose.yml (or keep
 # this file next to it and use `docker compose -f ... -f docker-compose.yml`),
 # then add IMMICH_API_KEY and ANTHROPIC_API_KEY to the stack's .env.
 #
-# Usage:
+# One-off commands run in the same container image any time (they don't
+# disturb the watcher):
 #   docker compose run --rm winnow check
 #   docker compose run --rm winnow scan --after 2024-06-01 --before 2024-07-01
-#   docker compose run --rm winnow triage --batch
 #   docker compose run --rm winnow report --out /data/winnow-report.html
+#
+# Prefer review-before-write? Use: command: ["watch", "--no-apply"] and apply
+# manually. Don't want the watcher at all? Add profiles: ["winnow"] to park
+# the service and use `docker compose run` only.
 #
 # The ledger, thumbnail cache, and reports live on the /data volume; mount a
 # host directory instead of the named volume if you want the HTML report easy
@@ -20,7 +27,8 @@ services:
   winnow:
     container_name: immich_winnow
     image: ghcr.io/robertcoop/immich-winnow:latest
-    profiles: ["winnow"]          # never auto-started by `docker compose up`
+    command: ["watch"]            # weekly cycle; e.g. ["watch", "--every", "3d", "--scoring-limit", "500"]
+    restart: unless-stopped
     env_file:
       - .env                      # reuse the Immich stack's .env
     environment:
@@ -60,6 +68,24 @@ services:
 
       # ---- thresholds --------------------------------------------------------
       # CANDIDATE_SCORE_MIN: "8"          # triage score floor for entering stage 2
+      # SCORING_LIMIT: "0"                # max already-scored anchors re-judged per run
+      #                                   # (new photos always score); 0 = unlimited
+
+      # ---- write-back behavior -----------------------------------------------
+      # BEST_ALBUM: "Five-Stars"         # album for the best photos ("" disables)
+      # BEST_ALBUM_MIN_STARS: "5"        # 5 = five-star only, 4 = include four-star
+      # FIVE_STAR_FAVORITE: "true"       # also favorite five-star photos
+
+      # ---- command-flag equivalents (WINNOW_*) ---------------------------------
+      # Every CLI flag is also an env var, so the watcher can be tuned here
+      # without a custom `command:`. The most useful ones:
+      # WINNOW_EVERY: "7d"               # watch cadence: 30m, 6h, 7d, 1w
+      # WINNOW_WINDOW_DAYS: "0"          # 0 = full-library sweep each cycle
+      # WINNOW_APPLY: "true"             # watch writes back each cycle (false = review-first)
+      # WINNOW_ALLOW_DEMOTIONS: "false"  # let re-ranking take five stars away
+      # WINNOW_BATCH: "false"            # triage via the 50%-off Batch API
+      # (see `winnow <command> --help` for the rest: WINNOW_AFTER, WINNOW_BEFORE,
+      #  WINNOW_LIMIT, WINNOW_BUCKETS, WINNOW_LIVE, WINNOW_YES, ...)
     volumes:
       - immich-winnow-data:/data  # ledger, thumbnail cache, reports
 

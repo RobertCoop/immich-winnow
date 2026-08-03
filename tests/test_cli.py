@@ -220,6 +220,15 @@ def immich_api() -> Iterator[respx.MockRouter]:
         router.post(f"{API}/stacks", name="stacks").mock(
             return_value=httpx.Response(201, json={"id": "stack-1"})
         )
+        router.get(f"{API}/albums", name="list_albums").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        router.post(f"{API}/albums", name="create_album").mock(
+            return_value=httpx.Response(201, json={"id": "album-1", "albumName": "Five-Stars"})
+        )
+        router.put(
+            url__regex=re.escape(API) + r"/albums/[^/]+/assets", name="album_assets"
+        ).mock(return_value=httpx.Response(200, json=[]))
         yield router
 
 
@@ -678,8 +687,9 @@ def test_dry_run_lists_the_planned_changes(
     assert "winnow/best" in output
     assert "winnow/screenshot" in output
     assert "stack 2 frames" in output
-    # one action per decision plus the burst stack
-    assert re.search(r"selected\s+5", output)
+    assert "Five-Stars" in output  # the default album roll-up
+    # one action per decision, plus the burst stack, plus the album
+    assert re.search(r"selected\s+6", output)
 
 
 def test_dry_run_truncates_a_long_plan_and_points_at_the_report(

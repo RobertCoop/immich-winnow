@@ -14,6 +14,7 @@ sets and skips the ones the ledger has already judged.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from winnow.config import Settings
@@ -22,7 +23,14 @@ from winnow.ledger import Ledger
 from winnow.pipeline.scan import ProgressFn, emit, load_thumb_b64
 from winnow.ranking import bradley_terry, build_bws_sets, bws_to_pairs, rank_scores
 
-__all__ = ["DEFAULT_SEED", "RankStats", "collect_pairs", "refit_scores", "run_rank"]
+__all__ = [
+    "DEFAULT_SEED",
+    "RankStats",
+    "cap_candidates",
+    "collect_pairs",
+    "refit_scores",
+    "run_rank",
+]
 
 #: Seed for BWS set design. Fixed so re-runs reproduce the same sets.
 DEFAULT_SEED = 20240601
@@ -37,6 +45,7 @@ class RankStats:
         sets_planned: Best-worst sets the design called for.
         sets_judged: Sets actually sent to the model this run.
         sets_skipped: Sets the ledger had already judged.
+        capped: Already-scored photos left out by the anchor cap.
         pairs: Pairwise outcomes the fit was given.
         scored: Photos that came out with a strength.
         errors: Sets skipped after an unusable reply or a missing thumbnail.
@@ -48,6 +57,7 @@ class RankStats:
     sets_planned: int = 0
     sets_judged: int = 0
     sets_skipped: int = 0
+    capped: int = 0
     pairs: int = 0
     scored: int = 0
     errors: int = 0
@@ -98,12 +108,41 @@ def refit_scores(
     return ranked
 
 
+def cap_candidates(
+    candidate_ids: Sequence[str], scores: dict[str, float], limit: int | None
+) -> list[str]:
+    """Every never-scored candidate, plus up to ``limit`` scored anchors.
+
+    New photos always enter scoring. But newcomers judged only against each
+    other float on a scale of their own — they connect to the existing ranking
+    only through already-scored photos appearing in the same sets. So a
+    capped run keeps *all* fresh candidates and mixes in up to ``limit``
+    veterans as anchors, chosen evenly across the existing ranking so the two
+    scales are pinned together at the top, middle and bottom.
+
+    ``limit`` of ``None`` or ``0`` means every veteran re-enters (no cap).
+    """
+    fresh = [asset_id for asset_id in candidate_ids if asset_id not in scores]
+    veterans = sorted(
+        (asset_id for asset_id in candidate_ids if asset_id in scores),
+        key=lambda asset_id: -scores[asset_id],
+    )
+    if limit is None or limit <= 0 or len(veterans) <= limit:
+        return fresh + veterans
+    if limit == 1:
+        return [*fresh, veterans[0]]
+    span = len(veterans) - 1
+    picks = sorted({round(k * span / (limit - 1)) for k in range(limit)})
+    return fresh + [veterans[i] for i in picks]
+
+
 def run_rank(
     settings: Settings,
     ledger: Ledger,
     judge: Judge,
     *,
     seed: int | None = DEFAULT_SEED,
+    limit: int | None = None,
     on_progress: ProgressFn | None = None,
 ) -> RankStats:
     """Run best-worst scaling over the candidate pool and fit strengths.
@@ -114,14 +153,30 @@ def run_rank(
         judge: Judge wrapping an Anthropic client.
         seed: Seed for the set design; keep it stable across runs so already
             judged sets can be recognised and skipped.
+        limit: Cap on how many *already-scored* photos re-enter scoring as
+            anchors alongside the newcomers (which always all enter).
+            ``None`` or ``0`` means no cap.
         on_progress: Optional callback receiving one short line per set.
 
     Returns:
         Counters describing the run.
     """
     stats = RankStats()
-    candidate_ids = [row["asset_id"] for row in ledger.candidates(settings.candidate_score_min)]
-    stats.candidates = len(candidate_ids)
+    all_candidates = [row["asset_id"] for row in ledger.candidates(settings.candidate_score_min)]
+    stats.candidates = len(all_candidates)
+    score_by_id = {
+        str(row["asset_id"]): float(row["bt_score"])
+        for row in ledger.score_rows()
+        if row.get("bt_score") is not None
+    }
+    candidate_ids = cap_candidates(all_candidates, score_by_id, limit)
+    stats.capped = len(all_candidates) - len(candidate_ids)
+    if stats.capped:
+        emit(
+            on_progress,
+            f"anchor cap: {stats.capped} already-scored photo(s) sit out; "
+            "their existing scores and pairs are kept",
+        )
 
     sets = build_bws_sets(
         candidate_ids,

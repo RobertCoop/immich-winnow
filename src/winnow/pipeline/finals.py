@@ -52,6 +52,7 @@ class FinalsStats:
         disagreements: Pairs where swapping the order flipped the answer.
         five_star: Photos awarded five stars.
         four_star: Photos awarded four stars.
+        protected: Prior five-stars kept at five against a lower fresh ranking.
         errors: Pairs skipped after an unusable reply or a missing thumbnail.
         input_tokens: Prompt tokens consumed.
         output_tokens: Completion tokens consumed.
@@ -65,6 +66,7 @@ class FinalsStats:
     disagreements: int = 0
     five_star: int = 0
     four_star: int = 0
+    protected: int = 0
     errors: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -135,6 +137,7 @@ def run_finals(
     *,
     five_count: int | None = None,
     four_frac: float = 0.3,
+    allow_demotions: bool = False,
     on_progress: ProgressFn | None = None,
 ) -> FinalsStats:
     """Play the finals and cut the result into star bands.
@@ -146,6 +149,10 @@ def run_finals(
         five_count: How many photos get five stars; defaults to
             :data:`DEFAULT_FIVE_FRACTION` of the pool (at least one).
         four_frac: Share of the photos below the five-star cut that get four.
+        allow_demotions: Five stars are sticky by default — a photo that ever
+            earned five (from Winnow, or already rated five in Immich itself)
+            is never re-scored lower by a later run. Pass ``True`` to let a
+            fresh ranking take stars away.
         on_progress: Optional callback receiving one short line per pair.
 
     Returns:
@@ -210,10 +217,36 @@ def run_finals(
         fives = max(1, round(len(order) * DEFAULT_FIVE_FRACTION))
     bands = star_bands(order, five_count=fives, four_frac=four_frac)
 
+    prior_five: set[str] = set()
+    external_five: set[str] = set()
+    if not allow_demotions:
+        # Winnow's own earlier awards, applied or not...
+        prior_five = {str(r["asset_id"]) for r in ledger.decisions(bucket="five_star")} | {
+            str(r["asset_id"]) for r in ledger.score_rows() if r.get("stars") == 5
+        }
+        # ...plus photos already rated five in Immich itself (by the user, or
+        # by a previously applied run) that Winnow never decided on.
+        external_five = {
+            str(r["id"]) for r in ledger.get_assets() if r.get("immich_rating") == 5
+        } - prior_five
+        in_order = set(order)
+        for asset_id in prior_five:
+            if bands.get(asset_id, 0) < 5 and (asset_id in bands or asset_id in in_order):
+                bands[asset_id] = 5
+                stats.protected += 1
+        # Never write a lower rating over an external five — just leave those
+        # photos alone this run.
+        for asset_id in external_five:
+            if bands.get(asset_id, 5) < 5:
+                del bands[asset_id]
+
     # A second finals run plays more rounds and reorders the pool, so photos
     # that have dropped out of the bands must lose last run's award — otherwise
-    # write-back keeps crowning a photo the ledger no longer ranks.
+    # write-back keeps crowning a photo the ledger no longer ranks. Sticky
+    # five-stars are exempt unless demotions were explicitly allowed.
     demoted = {asset_id for asset_id in order if asset_id not in bands}
+    if not allow_demotions:
+        demoted -= prior_five | external_five
     for row in ledger.score_rows():
         if row.get("stars") and row["asset_id"] in demoted:
             ledger.set_stars(row["asset_id"], None)
@@ -237,5 +270,9 @@ def run_finals(
         else:
             stats.four_star += 1
 
-    emit(on_progress, f"starred {stats.five_star} at five, {stats.four_star} at four")
+    protected_note = f" ({stats.protected} kept by sticky five-star)" if stats.protected else ""
+    emit(
+        on_progress,
+        f"starred {stats.five_star} at five, {stats.four_star} at four{protected_note}",
+    )
     return stats

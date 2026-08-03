@@ -53,6 +53,7 @@ BUCKET_GROUPS: dict[str, str] = {
     "nonphoto": "nonphoto",
     "five_star": "stars",
     "four_star": "stars",
+    "album": "stars",
     "burst_loser": "stacks",
     "burst_stack": "stacks",
 }
@@ -111,6 +112,7 @@ class ApplyStats:
     assets_tagged: int = 0
     tags_resolved: int = 0
     stacks_created: int = 0
+    album_assets: int = 0
     dry_run: bool = True
     actions: list[Action] = field(default_factory=list)
 
@@ -123,7 +125,9 @@ def _tag_op(asset_id: str, tag: str) -> dict[str, Any]:
     return {"op": "tag", "asset_id": asset_id, "tag": tag}
 
 
-def _action_for(asset_id: str, bucket: str, detail: Any) -> Action | None:
+def _action_for(
+    asset_id: str, bucket: str, detail: Any, *, favorite_five: bool = True
+) -> Action | None:
     """Build the action for one decision, or ``None`` when it means 'do nothing'."""
     info = detail if isinstance(detail, dict) else {}
     if bucket == "reject":
@@ -160,15 +164,18 @@ def _action_for(asset_id: str, bucket: str, detail: Any) -> Action | None:
             api_ops=[_tag_op(asset_id, TAG_BURST_LOSER)],
         )
     if bucket == "five_star":
+        extras = " + favorite" if favorite_five else ""
+        update = (
+            _update_op(asset_id, rating=5, is_favorite=True)
+            if favorite_five
+            else _update_op(asset_id, rating=5)
+        )
         return Action(
             asset_id=asset_id,
             burst_id=None,
             bucket=bucket,
-            description=f"crown {asset_id}: rating 5 + favorite + tag {TAG_BEST}",
-            api_ops=[
-                _update_op(asset_id, rating=5, is_favorite=True),
-                _tag_op(asset_id, TAG_BEST),
-            ],
+            description=f"crown {asset_id}: rating 5{extras} + tag {TAG_BEST}",
+            api_ops=[update, _tag_op(asset_id, TAG_BEST)],
         )
     if bucket == "four_star":
         return Action(
@@ -221,26 +228,66 @@ def _stack_actions(ledger: Ledger, unapplied_only: bool) -> list[Action]:
     return actions
 
 
-def plan(ledger: Ledger, *, unapplied_only: bool = True) -> list[Action]:
+def _album_action(ledger: Ledger, album: str, min_stars: int) -> Action | None:
+    """One idempotent group action collecting starred photos into an album.
+
+    Membership comes from *all* star decisions (applied or not): adding an
+    already-present asset to an Immich album is a no-op on the server, so the
+    action can be replanned every run and newly-configured albums pick up
+    photos crowned in earlier runs.
+    """
+    wanted = {"five_star"} if min_stars >= 5 else {"five_star", "four_star"}
+    asset_ids = sorted(
+        str(row["asset_id"])
+        for row in ledger.decisions()
+        if str(row.get("bucket") or "") in wanted
+    )
+    if not asset_ids:
+        return None
+    return Action(
+        asset_id=None,
+        burst_id=None,
+        bucket="album",
+        description=f"ensure album {album!r} holds {len(asset_ids)} starred photo(s)",
+        api_ops=[{"op": "album", "name": album, "asset_ids": asset_ids}],
+    )
+
+
+def plan(
+    ledger: Ledger,
+    *,
+    unapplied_only: bool = True,
+    album: str | None = None,
+    album_min_stars: int = 5,
+    favorite_five: bool = True,
+) -> list[Action]:
     """Describe every Immich change the ledger's decisions call for.
 
     Args:
         ledger: Open ledger.
         unapplied_only: Skip decisions already marked applied (the default),
             which is what makes ``apply`` resumable.
+        album: Album name to collect starred photos into; ``None``/empty
+            disables the album action.
+        album_min_stars: Smallest star band included in the album.
+        favorite_five: Whether five-star photos are also favorited.
 
     Returns:
         Actions in execution order: per-asset changes sorted by asset id,
-        then one stack per burst.
+        then one stack per burst, then the album roll-up.
     """
     actions: list[Action] = []
     for row in ledger.decisions(unapplied_only=unapplied_only):
         asset_id = str(row["asset_id"])
         bucket = str(row.get("bucket") or "")
-        action = _action_for(asset_id, bucket, row.get("detail"))
+        action = _action_for(asset_id, bucket, row.get("detail"), favorite_five=favorite_five)
         if action is not None:
             actions.append(action)
     actions.extend(_stack_actions(ledger, unapplied_only))
+    if album:
+        album_action = _album_action(ledger, album, album_min_stars)
+        if album_action is not None:
+            actions.append(album_action)
     return actions
 
 
@@ -265,6 +312,7 @@ def apply(
     buckets: set[str] | None = None,
     dry_run: bool = True,
     *,
+    album: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> ApplyStats:
     """Execute the plan against Immich.
@@ -276,22 +324,29 @@ def apply(
     never stacks the same frames twice.
 
     Args:
-        settings: Runtime configuration. Write-back reads no knobs of its own;
-            the parameter keeps the ``(settings, ledger, ...)`` shape every
-            pipeline stage shares, so the CLI can call them uniformly.
+        settings: Runtime configuration — supplies ``best_album``,
+            ``best_album_min_stars`` and ``five_star_favorite``.
         ledger: Open ledger.
         immich: Connected Immich client.
         buckets: Groups to act on — any of ``reject``, ``nonphoto``, ``stars``,
             ``stacks``. ``None`` means all of them.
         dry_run: When true (the default) nothing is sent and the plan is
             returned as-is.
+        album: Album name override; ``None`` falls back to
+            ``settings.best_album`` and ``""`` disables the album for this run.
         on_progress: Optional callback receiving one short line per step.
 
     Returns:
         Counters plus the selected actions.
     """
     groups = ALL_GROUPS if buckets is None else {str(b) for b in buckets}
-    everything = plan(ledger)
+    album_name = settings.best_album if album is None else album
+    everything = plan(
+        ledger,
+        album=album_name or None,
+        album_min_stars=settings.best_album_min_stars,
+        favorite_five=settings.five_star_favorite,
+    )
     selected = [action for action in everything if action.group in groups]
     stats = ApplyStats(
         planned=len(everything),
@@ -350,6 +405,22 @@ def apply(
         except ImmichError as exc:
             failed_assets.add(asset_id)
             emit(on_progress, f"update {asset_id} failed: {exc}")
+
+    for action in selected:
+        for op in action.api_ops:
+            if op["op"] != "album":
+                continue
+            name = str(op["name"])
+            members = list(op["asset_ids"])
+            try:
+                album_id = immich.upsert_album(name)
+                immich.add_album_assets(album_id, members)
+                stats.album_assets += len(members)
+                stats.applied += 1
+                emit(on_progress, f"album {name!r}: ensured {len(members)} member(s)")
+            except ImmichError as exc:
+                stats.failed += 1
+                emit(on_progress, f"album {name!r} failed: {exc}")
 
     if stacked:
         ledger.mark_stacked(stacked)

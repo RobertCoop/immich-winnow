@@ -336,6 +336,15 @@ def immich_api(dup_groups: list[dict[str, Any]]) -> Iterator[respx.MockRouter]:
         router.post(f"{API}/stacks", name="create_stack").mock(
             return_value=httpx.Response(201, json={"id": "stack-1"})
         )
+        router.get(f"{API}/albums", name="list_albums").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        router.post(f"{API}/albums", name="create_album").mock(
+            return_value=httpx.Response(201, json={"id": "album-1", "albumName": "Five-Stars"})
+        )
+        router.put(
+            url__regex=re.escape(API) + r"/albums/[^/]+/assets", name="album_assets"
+        ).mock(return_value=httpx.Response(200, json=[]))
         yield router
 
 
@@ -896,7 +905,7 @@ def test_apply_dry_run_writes_nothing(
     ledger: Ledger,
     immich: ImmichClient,
 ) -> None:
-    stats = writeback.apply(settings, ledger, immich, dry_run=True)
+    stats = writeback.apply(settings, ledger, immich, dry_run=True, album="")
     assert stats.dry_run is True
     assert stats.planned == 8
     assert stats.selected == 8
@@ -914,7 +923,7 @@ def test_apply_live_writes_to_immich(
     ledger: Ledger,
     immich: ImmichClient,
 ) -> None:
-    stats = writeback.apply(settings, ledger, immich, dry_run=False)
+    stats = writeback.apply(settings, ledger, immich, dry_run=False, album="")
     assert stats.dry_run is False
     assert stats.applied == 8
     assert stats.failed == 0
@@ -962,11 +971,11 @@ def test_apply_marks_decisions_applied_and_is_resumable(
     ledger: Ledger,
     immich: ImmichClient,
 ) -> None:
-    writeback.apply(settings, ledger, immich, dry_run=False)
+    writeback.apply(settings, ledger, immich, dry_run=False, album="")
     assert writeback.plan(ledger) == []
 
     calls_before = immich_api["update_asset"].call_count
-    again = writeback.apply(settings, ledger, immich, dry_run=False)
+    again = writeback.apply(settings, ledger, immich, dry_run=False, album="")
     assert again.selected == 0
     assert again.applied == 0
     assert immich_api["update_asset"].call_count == calls_before
@@ -980,7 +989,7 @@ def test_apply_honours_the_bucket_filter(
     ledger: Ledger,
     immich: ImmichClient,
 ) -> None:
-    stats = writeback.apply(settings, ledger, immich, {"reject"}, False)
+    stats = writeback.apply(settings, ledger, immich, {"reject"}, False, album="")
     assert stats.planned == 8
     assert stats.selected == 1
     assert stats.applied == 1
@@ -1014,7 +1023,7 @@ def test_apply_records_immich_failures(
     immich: ImmichClient,
 ) -> None:
     immich_api["update_asset"].mock(return_value=httpx.Response(500, text="nope"))
-    stats = writeback.apply(settings, ledger, immich, dry_run=False)
+    stats = writeback.apply(settings, ledger, immich, dry_run=False, album="")
     assert stats.failed == 5
     assert stats.applied == 3  # two burst tags plus the stack
     still_pending = {action.asset_id for action in writeback.plan(ledger)}
@@ -1270,8 +1279,9 @@ def test_finals_rerun_retracts_stale_stars(
     run_finals(settings, ledger, judge, five_count=4, four_frac=0.0)
     assert len([r for r in ledger.score_rows() if r["stars"]]) == 4
 
-    # a stricter cut must demote the rest, not accumulate awards
-    run_finals(settings, ledger, judge, five_count=1, four_frac=0.0)
+    # a stricter cut must demote the rest, not accumulate awards — but only
+    # when demotions are explicitly allowed (five stars are sticky by default)
+    run_finals(settings, ledger, judge, five_count=1, four_frac=0.0, allow_demotions=True)
     starred = {row["asset_id"]: row["stars"] for row in ledger.score_rows() if row["stars"]}
     assert len(starred) == 1
     buckets = Counter(buckets_of(ledger).values())

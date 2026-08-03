@@ -46,7 +46,11 @@ end to end.
 Winnow ships as a headless container image, deployed the same way as
 [immich-power-tools](https://github.com/immich-power-tools/immich-power-tools):
 add one service to the compose stack you already run, reusing its `.env`.
-There's no web UI and no port — you invoke commands with `docker compose run`.
+There's no web UI and no port. By default the service **stays running and
+sweeps your whole library once a week** (`winnow watch`): scan, judge, rank,
+apply, refresh the report, sleep. Every stage is incremental, so photos it has
+already judged cost nothing — each cycle only spends on what's new, and even
+backdated imports are picked up because the sweep re-enumerates everything.
 
 ```yaml
 services:
@@ -54,7 +58,8 @@ services:
   winnow:
     container_name: immich_winnow
     image: ghcr.io/robertcoop/immich-winnow:latest
-    profiles: ["winnow"]          # never auto-started by `docker compose up`
+    command: ["watch"]            # weekly unattended cycle (see below)
+    restart: unless-stopped
     env_file:
       - .env                      # reuse the Immich stack's .env
     environment:
@@ -67,7 +72,13 @@ volumes:
 ```
 
 Add two lines to the stack's `.env` (`IMMICH_API_KEY=...`,
-`ANTHROPIC_API_KEY=...`), then:
+`ANTHROPIC_API_KEY=...`) and `docker compose up -d winnow`. Heads-up: the
+first cycle on a fresh ledger processes your entire library. Tune with e.g.
+`command: ["watch", "--every", "3d", "--scoring-limit", "500"]`, keep a
+human in the loop with `["watch", "--no-apply"]`, or park the watcher by
+adding `profiles: ["winnow"]`.
+
+One-off commands work any time, watcher or not:
 
 ```bash
 docker compose run --rm winnow check
@@ -120,13 +131,18 @@ uv run winnow scan --after 2024-06-01 --before 2024-06-08
 uv run winnow triage --limit 50                      # try 50 photos first to sanity-check cost
 uv run winnow triage                                 # stage 1 (--direct is the default; --batch is 50% off)
 uv run winnow poll --ingest                          # if using --batch: fetch finished results
-uv run winnow rank                                   # stage 2
-uv run winnow finals                                 # stage 3
+uv run winnow rank                                   # stage 2 (--limit caps re-judged anchors)
+uv run winnow finals                                 # stage 3 (--allow-demotions to un-stick five-stars)
+uv run winnow watch --once                           # one full sweep: scan+judge+rank+apply+report
 uv run winnow report --out winnow-report.html        # HTML contact sheet — review it!
 uv run winnow apply --dry-run                        # see exactly what would change (-v for the full list)
 uv run winnow apply --live --buckets reject,stars    # write back to Immich (asks first; -y to skip)
 uv run winnow status                                 # ledger summary any time
 ```
+
+`triage`, `poll --ingest` and `finals` all take `--apply` to write their
+changes to Immich immediately instead of waiting for a reviewed `apply`;
+`watch` applies by default (that's its job — use `--no-apply` to review).
 
 `winnow --version` prints the version; every command takes `--help`.
 
@@ -145,7 +161,8 @@ bulk edit in the Immich UI over a tag's assets.
 | Confident rejects | archived + tag `winnow/reject` (+ rating −1 on servers that persist it — Immich v3.1 silently drops −1) | unarchive / untag |
 | Confident non-photos — screenshots, documents, memes, and other (wallpapers, illustrations, renders) | archived + tag `winnow/screenshot`, `winnow/document`, `winnow/meme` or `winnow/other` | unarchive / untag |
 | Burst also-rans | stacked under the winner + tag `winnow/burst-loser` | un-stack / untag |
-| ★★★★★ finalists | rating 5 + favorite + tag `winnow/best` | clear rating / unfavorite / untag |
+| ★★★★★ finalists | rating 5 + favorite (unless `FIVE_STAR_FAVORITE=false`) + tag `winnow/best` | clear rating / unfavorite / untag |
+| Starred photos | collected into the `Five-Stars` album (`BEST_ALBUM`; `BEST_ALBUM_MIN_STARS=4` includes ★★★★; `BEST_ALBUM=` disables) | remove from album |
 | ★★★★ finalists | rating 4 (no tag — they are indistinguishable from your own 4-star ratings) | clear rating |
 | Everything else | untouched | — |
 
@@ -154,6 +171,14 @@ reject or an unsure "that's a meme" stays in the untouched middle.
 
 ## Design notes
 
+- **Five stars are sticky.** Once a photo earns five stars — from Winnow or
+  rated five in Immich by you — later runs never score it lower. A re-ranking
+  can only demote it when you pass `finals --allow-demotions`.
+- **New photos always get scored; anchors keep the scale honest.** When new
+  candidates arrive, they are ranked in sets mixed with already-scored
+  "anchor" photos spread across the existing ranking — otherwise newcomers
+  would float on a scale of their own. `SCORING_LIMIT` caps how many anchors
+  are re-judged per run; newcomers are never capped.
 - **Asymmetric caution.** Hiding a photo you'd cherish is the only expensive
   mistake, so rejection requires a high-confidence verdict, and `apply` is
   dry-run by default. The judge is told that sentimental value is unknowable —

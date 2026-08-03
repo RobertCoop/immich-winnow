@@ -58,6 +58,17 @@ class Settings(BaseSettings):
 
     # --- thresholds ---
     candidate_score_min: int = 8
+    # Max already-scored photos re-judged as ranking anchors per run; every
+    # new photo always enters scoring. 0 = unlimited.
+    scoring_limit: int = 0
+
+    # --- write-back behavior ---
+    # Album to collect the best photos into ("" disables). Created if missing.
+    best_album: str = "Five-Stars"
+    # Minimum star band that lands in the album (5 = five-star only, 4 = both).
+    best_album_min_stars: int = 5
+    # Whether five-star photos are also marked as Immich favorites.
+    five_star_favorite: bool = True
 
     @property
     def immich_base(self) -> str:

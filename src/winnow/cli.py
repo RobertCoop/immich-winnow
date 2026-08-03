@@ -10,9 +10,11 @@ Settings are loaded *inside* each command rather than at import time, so
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -345,8 +347,14 @@ def check() -> None:
 
 @app.command()
 def scan(
-    after: Annotated[str, typer.Option("--after", help="Start of the window, YYYY-MM-DD.")],
-    before: Annotated[str, typer.Option("--before", help="End of the window, YYYY-MM-DD.")],
+    after: Annotated[
+        str,
+        typer.Option("--after", envvar="WINNOW_AFTER", help="Start of the window, YYYY-MM-DD."),
+    ],
+    before: Annotated[
+        str,
+        typer.Option("--before", envvar="WINNOW_BEFORE", help="End of the window, YYYY-MM-DD."),
+    ],
 ) -> None:
     """Pull a date window of Immich photos into the local ledger."""
     with session(immich=True) as ses, progress_reporter("Scanning") as report:
@@ -354,19 +362,47 @@ def scan(
     print_stats(f"Scan {after} → {before}", stats)
 
 
+def _apply_now(ses: Session, groups: set[str]) -> None:
+    """Write freshly-made decisions for ``groups`` to Immich right away."""
+    with progress_reporter("Applying") as report:
+        stats = writeback.apply(
+            ses.settings, ses.ledger, ses.api, groups, False, on_progress=report
+        )
+    print_stats("Write-back", stats, skip=("actions",))
+
+
 @app.command()
 def triage(
     batch: Annotated[
         bool,
-        typer.Option("--batch/--direct", help="Use the 50%-cheaper Batch API, not live calls."),
+        typer.Option(
+            "--batch/--direct",
+            envvar="WINNOW_BATCH",
+            help="Use the 50%-cheaper Batch API, not live calls.",
+        ),
     ] = False,
     limit: Annotated[
-        int | None, typer.Option("--limit", help="Stop after this many work items.")
+        int | None,
+        typer.Option("--limit", envvar="WINNOW_LIMIT", help="Stop after this many work items."),
     ] = None,
+    apply_now: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            envvar="WINNOW_APPLY",
+            help="Write reject/non-photo/stack changes to Immich immediately, "
+            "skipping the separate review-then-apply step.",
+        ),
+    ] = False,
 ) -> None:
     """Stage 1 — judge every photo, settling bursts with one call each."""
-    with session(judge=True) as ses:
+    with session(immich=apply_now, judge=True) as ses:
         if batch:
+            if apply_now:
+                console.print(
+                    "[yellow]--apply does nothing with --batch; "
+                    "use it on `winnow poll --ingest` instead.[/yellow]"
+                )
             with progress_reporter("Queueing") as report:
                 batch_id = submit_triage_batch(ses.settings, ses.ledger, ses.claude, limit, report)
             if batch_id is None:
@@ -379,6 +415,8 @@ def triage(
         with progress_reporter("Triaging") as report:
             stats = run_triage_direct(ses.settings, ses.ledger, ses.claude, limit, report)
         model = ses.settings.triage_model
+        if apply_now:
+            _apply_now(ses, {"reject", "nonphoto", "stacks"})
     print_stats("Triage", stats)
     print_cost(model, stats)
 
@@ -386,11 +424,21 @@ def triage(
 @app.command()
 def poll(
     ingest: Annotated[
-        bool, typer.Option("--ingest", help="Ingest every finished batch into the ledger.")
+        bool, typer.Option(
+            "--ingest", envvar="WINNOW_INGEST", help="Ingest every finished batch into the ledger."
+        )
+    ] = False,
+    apply_now: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            envvar="WINNOW_APPLY",
+            help="After ingesting, write reject/non-photo/stack changes to Immich immediately.",
+        ),
     ] = False,
 ) -> None:
     """Show open Batch API jobs, and optionally ingest the finished ones."""
-    with session(judge=True) as ses:
+    with session(immich=apply_now and ingest, judge=True) as ses:
         open_batches = ses.ledger.open_batches()
         if not open_batches:
             console.print("No open batches.")
@@ -422,28 +470,70 @@ def poll(
         with progress_reporter("Ingesting") as report:
             stats = ingest_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
         model = ses.settings.triage_model
+        if apply_now:
+            _apply_now(ses, {"reject", "nonphoto", "stacks"})
     print_stats("Ingested", stats)
     print_cost(model, stats, batch=True)
 
 
 @app.command()
-def rank() -> None:
+def rank(
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            help="Max already-scored photos re-judged as ranking anchors; every "
+            "new candidate is always scored (SCORING_LIMIT setting; "
+            "0 = unlimited).",
+        ),
+    ] = None,
+) -> None:
     """Stage 2 — rank the candidates with best-worst scaling sets."""
     with session(judge=True) as ses:
+        cap = ses.settings.scoring_limit if limit is None else limit
         with progress_reporter("Ranking") as report:
-            stats = run_rank(ses.settings, ses.ledger, ses.claude, on_progress=report)
+            stats = run_rank(
+                ses.settings, ses.ledger, ses.claude, limit=cap or None, on_progress=report
+            )
         model = ses.settings.rank_model
     print_stats("Rank", stats)
     print_cost(model, stats)
 
 
 @app.command()
-def finals() -> None:
+def finals(
+    allow_demotions: Annotated[
+        bool,
+        typer.Option(
+            "--allow-demotions",
+            envvar="WINNOW_ALLOW_DEMOTIONS",
+            help="Let a fresh ranking take five stars away. By default five-star "
+            "awards (Winnow's or Immich's own) are sticky and never lowered.",
+        ),
+    ] = False,
+    apply_now: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            envvar="WINNOW_APPLY",
+            help="Write star/favorite/album changes to Immich immediately, "
+            "skipping the separate review-then-apply step.",
+        ),
+    ] = False,
+) -> None:
     """Stage 3 — Swiss head-to-heads over the top pool, then star bands."""
-    with session(judge=True) as ses:
+    with session(immich=apply_now, judge=True) as ses:
         with progress_reporter("Finals") as report:
-            stats = run_finals(ses.settings, ses.ledger, ses.claude, on_progress=report)
+            stats = run_finals(
+                ses.settings,
+                ses.ledger,
+                ses.claude,
+                allow_demotions=allow_demotions,
+                on_progress=report,
+            )
         model = ses.settings.finals_model
+        if apply_now:
+            _apply_now(ses, {"stars"})
     print_stats("Finals", stats)
     print_cost(model, stats)
 
@@ -451,7 +541,9 @@ def finals() -> None:
 @app.command()
 def report(
     out: Annotated[
-        Path, typer.Option("--out", help="Where to write the HTML contact sheet.")
+        Path, typer.Option(
+            "--out", envvar="WINNOW_REPORT_OUT", help="Where to write the HTML contact sheet."
+        )
     ] = Path("winnow-report.html"),
 ) -> None:
     """Write a self-contained HTML contact sheet of every decision."""
@@ -484,22 +576,50 @@ def _print_actions(actions: list[writeback.Action], title: str, verbose: bool) -
 @app.command()
 def apply(
     buckets: Annotated[
-        str, typer.Option("--buckets", help="Comma-separated groups to write back.")
+        str, typer.Option(
+            "--buckets", envvar="WINNOW_BUCKETS", help="Comma-separated groups to write back."
+        )
     ] = DEFAULT_BUCKETS,
     live: Annotated[
-        bool, typer.Option("--live/--dry-run", help="Actually write to Immich.")
+        bool,
+        typer.Option("--live/--dry-run", envvar="WINNOW_LIVE", help="Actually write to Immich."),
     ] = False,
     yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt (for scripts).")
+        bool, typer.Option(
+            "--yes", "-y", envvar="WINNOW_YES", help="Skip the confirmation prompt (for scripts)."
+        )
     ] = False,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="List every change, not just the first few.")
+        bool, typer.Option(
+            "--verbose",
+            "-v",
+            envvar="WINNOW_VERBOSE",
+            help="List every change, not just the first few.",
+        )
     ] = False,
+    album: Annotated[
+        str | None,
+        typer.Option(
+            "--album",
+            help="Override the album for starred photos (BEST_ALBUM setting; "
+            "'' disables it for this run).",
+        ),
+    ] = None,
 ) -> None:
     """Write decisions back to Immich. Dry-run unless --live is given."""
     groups = parse_buckets(buckets)
     with session(immich=True) as ses:
-        planned = [a for a in writeback.plan(ses.ledger) if a.group in groups]
+        album_name = ses.settings.best_album if album is None else album
+        planned = [
+            a
+            for a in writeback.plan(
+                ses.ledger,
+                album=album_name or None,
+                album_min_stars=ses.settings.best_album_min_stars,
+                favorite_five=ses.settings.five_star_favorite,
+            )
+            if a.group in groups
+        ]
         if not planned:
             console.print("Nothing to write back.")
             return
@@ -519,6 +639,7 @@ def apply(
                 ses.api,
                 groups,
                 not live,
+                album=album,
                 on_progress=report,
             )
 
@@ -527,6 +648,118 @@ def apply(
         console.print("[yellow]Dry run — nothing was written. Re-run with --live.[/yellow]")
     if stats.actions:
         _print_actions(stats.actions, "Planned changes" if not live else "Changes written", verbose)
+
+
+_EVERY_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
+
+
+def parse_every(text: str) -> float:
+    """Parse an interval like ``90s``, ``30m``, ``6h``, ``7d`` or ``1w`` to seconds.
+
+    A bare number means seconds. Raises ``typer.BadParameter`` on nonsense.
+    """
+    cleaned = text.strip().lower()
+    multiplier = 1.0
+    if cleaned and cleaned[-1] in _EVERY_UNITS:
+        multiplier = _EVERY_UNITS[cleaned[-1]]
+        cleaned = cleaned[:-1]
+    try:
+        value = float(cleaned)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"cannot parse interval {text!r} (try 30m, 6h, 7d, 1w)"
+        ) from exc
+    if value <= 0:
+        raise typer.BadParameter("the interval must be positive")
+    return value * multiplier
+
+
+@app.command()
+def watch(
+    every: Annotated[
+        str, typer.Option(
+            "--every", envvar="WINNOW_EVERY", help="How often to run a cycle: 30m, 6h, 7d, 1w."
+        )
+    ] = "7d",
+    window_days: Annotated[
+        int,
+        typer.Option(
+            "--window-days",
+            envvar="WINNOW_WINDOW_DAYS",
+            help="0 (default) re-enumerates the ENTIRE library every cycle, so "
+            "every new photo is picked up even when imported with old dates. "
+            "N > 0 restricts each cycle to a trailing taken-date window.",
+        ),
+    ] = 0,
+    apply_changes: Annotated[
+        bool,
+        typer.Option(
+            "--apply/--no-apply",
+            envvar="WINNOW_APPLY",
+            help="Write each cycle's decisions straight to Immich (the point of "
+            "an unattended watcher). --no-apply just accumulates decisions "
+            "for a manual `winnow apply`.",
+        ),
+    ] = True,
+    scoring_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--scoring-limit",
+            help="Max already-scored photos re-judged as ranking anchors per "
+            "cycle; every new photo is always scored "
+            "(SCORING_LIMIT setting; 0 = unlimited).",
+        ),
+    ] = None,
+    once: Annotated[
+        bool, typer.Option(
+            "--once", envvar="WINNOW_ONCE", help="Run a single cycle and exit (for cron/testing)."
+        )
+    ] = False,
+) -> None:
+    """Stay running: scan new photos, judge, rank and apply on an interval.
+
+    This is the container's default mode — a weekly, fully unattended sweep
+    of the whole library. Every stage is incremental, so photos the ledger
+    already knows cost nothing; only genuinely new material is judged. That
+    means the first cycle on a fresh ledger processes the entire library.
+    """
+    interval = parse_every(every)
+    while True:
+        cycle_start = datetime.now(UTC)
+        if window_days > 0:
+            after = (cycle_start - timedelta(days=window_days)).date().isoformat()
+        else:
+            after = "1970-01-01"
+        before = (cycle_start + timedelta(days=1)).date().isoformat()
+        heading(f"Cycle {cycle_start:%Y-%m-%d %H:%M} — window {after} → {before}")
+
+        with session(immich=True, judge=True) as ses:
+            cap = ses.settings.scoring_limit if scoring_limit is None else scoring_limit
+            with progress_reporter("Scanning") as report:
+                run_scan(ses.settings, ses.ledger, ses.api, after, before, on_progress=report)
+            with progress_reporter("Triaging") as report:
+                t_stats = run_triage_direct(ses.settings, ses.ledger, ses.claude, None, report)
+            print_cost(ses.settings.triage_model, t_stats)
+            with progress_reporter("Ranking") as report:
+                r_stats = run_rank(
+                    ses.settings, ses.ledger, ses.claude, limit=cap or None, on_progress=report
+                )
+            print_cost(ses.settings.rank_model, r_stats)
+            with progress_reporter("Finals") as report:
+                f_stats = run_finals(ses.settings, ses.ledger, ses.claude, on_progress=report)
+            print_cost(ses.settings.finals_model, f_stats)
+            if apply_changes:
+                _apply_now(ses, set(parse_buckets(DEFAULT_BUCKETS)))
+            report_path = write_html_report(
+                ses.ledger, ses.settings.cache_dir, Path("winnow-report.html")
+            )
+            console.print(f"[dim]Report refreshed: {report_path}[/dim]")
+
+        if once:
+            return
+        next_run = datetime.now(UTC) + timedelta(seconds=interval)
+        console.print(f"Sleeping until [bold]{next_run:%Y-%m-%d %H:%M} UTC[/bold] ({every}).")
+        time.sleep(interval)
 
 
 @app.command()
