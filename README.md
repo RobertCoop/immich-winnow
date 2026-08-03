@@ -41,6 +41,45 @@ end to end.
 
 ## Install
 
+### Docker, alongside your Immich stack (recommended for servers)
+
+Winnow ships as a headless container image, deployed the same way as
+[immich-power-tools](https://github.com/immich-power-tools/immich-power-tools):
+add one service to the compose stack you already run, reusing its `.env`.
+There's no web UI and no port — you invoke commands with `docker compose run`.
+
+```yaml
+services:
+  # ...your immich services...
+  winnow:
+    container_name: immich_winnow
+    image: ghcr.io/robertcoop/immich-winnow:latest
+    profiles: ["winnow"]          # never auto-started by `docker compose up`
+    env_file:
+      - .env                      # reuse the Immich stack's .env
+    environment:
+      IMMICH_URL: http://immich-server:2283   # Immich by compose service name
+    volumes:
+      - immich-winnow-data:/data  # ledger, thumbnail cache, reports
+
+volumes:
+  immich-winnow-data:
+```
+
+Add two lines to the stack's `.env` (`IMMICH_API_KEY=...`,
+`ANTHROPIC_API_KEY=...`), then:
+
+```bash
+docker compose run --rm winnow check
+docker compose run --rm winnow scan --after 2024-06-01 --before 2024-07-01
+docker compose run --rm winnow triage --batch
+# ...and so on; every CLI command below works the same way.
+```
+
+The ledger and reports persist on the `immich-winnow-data` volume (mount a
+host directory instead if you want the HTML report easy to open). A sample
+[docker-compose.yml](docker-compose.yml) ships in this repo.
+
 ### As a tool
 
 ```bash

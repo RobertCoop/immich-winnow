@@ -50,3 +50,14 @@ def test_env_example_documents_every_knob():
         name.upper() for name in Settings.model_fields if name.upper() not in documented
     )
     assert missing == [], f"undocumented settings: {missing}"
+
+
+def test_compose_file_documents_every_knob():
+    """The reference docker-compose.yml must mention every setting by its
+    environment-variable name, active or commented, so compose users can
+    discover every knob without leaving the file."""
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text()
+    missing = sorted(
+        name.upper() for name in Settings.model_fields if name.upper() not in compose
+    )
+    assert missing == [], f"settings not documented in docker-compose.yml: {missing}"

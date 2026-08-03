@@ -1,0 +1,67 @@
+# Reference service block for running Winnow inside your Immich compose stack,
+# mirroring how immich-power-tools is deployed. Winnow is headless: it does not
+# stay running — you invoke commands with `docker compose run`.
+#
+# Add the `winnow` service to your existing Immich docker-compose.yml (or keep
+# this file next to it and use `docker compose -f ... -f docker-compose.yml`),
+# then add IMMICH_API_KEY and ANTHROPIC_API_KEY to the stack's .env.
+#
+# Usage:
+#   docker compose run --rm winnow check
+#   docker compose run --rm winnow scan --after 2024-06-01 --before 2024-07-01
+#   docker compose run --rm winnow triage --batch
+#   docker compose run --rm winnow report --out /data/winnow-report.html
+#
+# The ledger, thumbnail cache, and reports live on the /data volume; mount a
+# host directory instead of the named volume if you want the HTML report easy
+# to open from the host.
+
+services:
+  winnow:
+    container_name: immich_winnow
+    image: ghcr.io/robertcoop/immich-winnow:latest
+    profiles: ["winnow"]          # never auto-started by `docker compose up`
+    env_file:
+      - .env                      # reuse the Immich stack's .env
+    environment:
+      # ---- required -------------------------------------------------------
+      # Where to reach Immich. Inside the stack's network, use the compose
+      # service name; from outside, a LAN URL like http://192.168.1.10:2283.
+      IMMICH_URL: ${WINNOW_IMMICH_URL:-http://immich-server:2283}
+      # These two come from the stack's .env (via env_file above):
+      #   IMMICH_API_KEY      Immich → Account Settings → API Keys
+      #   ANTHROPIC_API_KEY   console.anthropic.com
+
+      # ---- storage (defaults baked into the image; both live on /data) ----
+      # DB_PATH: /data/winnow.db          # SQLite ledger — Winnow's memory
+      # CACHE_DIR: /data/cache            # resized thumbnails
+
+      # ---- models per stage ------------------------------------------------
+      # TRIAGE_MODEL: claude-haiku-4-5    # stage 1: every photo
+      # RANK_MODEL: claude-sonnet-5       # stage 2: best-worst sets
+      # FINALS_MODEL: claude-opus-5       # stage 3: head-to-head finals
+
+      # ---- thumbnail preparation -------------------------------------------
+      # IMAGE_EDGE: "768"                 # long edge (px) sent to the judge
+      # JPEG_QUALITY: "82"                # re-encode quality (also strips EXIF)
+
+      # ---- burst detection ---------------------------------------------------
+      # BURST_GAP_SECONDS: "10"           # max seconds between burst frames
+      # BURST_MAX_GROUP: "10"             # max frames judged as one contest
+      # DHASH_MAX_DISTANCE: "26"          # perceptual-hash split threshold (0-64)
+
+      # ---- stage 2: best-worst scaling --------------------------------------
+      # BWS_SET_SIZE: "8"                 # photos shown per set
+      # BWS_APPEARANCES: "4"              # sets each candidate appears in
+
+      # ---- stage 3: finals ---------------------------------------------------
+      # FINALS_POOL_SIZE: "50"            # top-scoring photos that enter finals
+      # FINALS_ROUNDS: "3"                # Swiss rounds
+
+      # ---- thresholds --------------------------------------------------------
+      # CANDIDATE_SCORE_MIN: "8"          # triage score floor for entering stage 2
+    volumes:
+      - immich-winnow-data:/data  # ledger, thumbnail cache, reports
+
+volumes:
+  immich-winnow-data:
