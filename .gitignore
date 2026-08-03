@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Winnow runtime artifacts
+*.db
+*.db-wal
+*.db-shm
+.winnow-cache/
+winnow-report*.html
