@@ -539,3 +539,111 @@ def test_low_star_writeback_is_rating_only(tmp_path):
     assert ops["three_star"] == [{"op": "update_asset", "asset_id": "x1", "rating": 3}]
     assert ops["one_star"] == [{"op": "update_asset", "asset_id": "x2", "rating": 1}]
     assert all(a.group == "stars" for a in writeback.plan(ledger))
+
+
+# ----------------------------------------------------------------------
+# captions & keyword tags (enrichment)
+# ----------------------------------------------------------------------
+
+
+def _verdict(caption="kids at the beach", keywords=("beach", "kids")):
+    return TriageVerdict(
+        category="photo",
+        verdict="neutral",
+        technical_score=6,
+        reasons=["ordinary"],
+        confidence="medium",
+        caption=caption,
+        keywords=list(keywords),
+    )
+
+
+def test_keywords_are_normalized():
+    v = _verdict(keywords=["Beach", " beach ", "Golden  Retriever", ""])
+    assert v.keywords == ["beach", "golden retriever"]
+
+
+def _seed_enrichable(tmp_path, description=None) -> Ledger:
+    ledger = Ledger(tmp_path / "enrich.db")
+    row = _asset_row(A)
+    row["immich_description"] = description
+    ledger.upsert_assets([row])
+    ledger.record_triage(A, _verdict(), "test-model", None)
+    return ledger
+
+
+def test_enrich_plans_caption_and_keyword_tags(tmp_path):
+    ledger = _seed_enrichable(tmp_path)
+    actions = writeback.plan(ledger, write_captions=True, keyword_tags=True)
+    (enrich,) = [a for a in actions if a.bucket == "enrich"]
+    assert enrich.group == "enrich"
+    assert enrich.api_ops[0] == {
+        "op": "update_asset",
+        "asset_id": A,
+        "description": "kids at the beach",
+    }
+    assert {op["tag"] for op in enrich.api_ops[1:]} == {"kw/beach", "kw/kids"}
+
+
+def test_enrich_never_overwrites_an_existing_description(tmp_path):
+    ledger = _seed_enrichable(tmp_path, description="my own words")
+    actions = writeback.plan(ledger, write_captions=True, keyword_tags=False)
+    assert [a for a in actions if a.bucket == "enrich"] == []
+
+
+def test_enrich_keyword_prefix_empty_means_top_level(tmp_path):
+    ledger = _seed_enrichable(tmp_path)
+    actions = writeback.plan(
+        ledger, write_captions=False, keyword_tags=True, keyword_prefix=""
+    )
+    (enrich,) = [a for a in actions if a.bucket == "enrich"]
+    assert {op["tag"] for op in enrich.api_ops} == {"beach", "kids"}
+
+
+def test_enrich_off_by_default_in_bare_plan(tmp_path):
+    ledger = _seed_enrichable(tmp_path)
+    assert [a for a in writeback.plan(ledger) if a.bucket == "enrich"] == []
+
+
+@respx.mock
+def test_apply_enrich_writes_and_marks_done(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("KEYWORD_TAGS", "true")
+    settings = load_settings()
+    ledger = _seed_enrichable(tmp_path)
+    respx.put(f"{BASE}/api/tags").mock(
+        side_effect=lambda request: Response(
+            200,
+            json=[
+                {"id": f"t{i}", "name": n.rsplit("/", 1)[-1], "value": n}
+                for i, n in enumerate(json.loads(request.content)["tags"])
+            ],
+        )
+    )
+    respx.put(url__regex=rf"{BASE}/api/tags/[^/]+/assets").mock(
+        return_value=Response(200, json=[])
+    )
+    update_route = respx.put(f"{BASE}/api/assets/{A}").mock(return_value=Response(200, json={}))
+    respx.get(f"{BASE}/api/albums").mock(return_value=Response(200, json=[]))
+    respx.post(f"{BASE}/api/albums").mock(return_value=Response(201, json={"id": "a1"}))
+    respx.put(url__regex=rf"{BASE}/api/albums/[^/]+/assets").mock(
+        return_value=Response(200, json=[])
+    )
+
+    with ImmichClient(BASE, "k") as immich:
+        stats = writeback.apply(settings, ledger, immich, {"enrich"}, dry_run=False)
+
+    assert stats.enriched == 1
+    body = json.loads(update_route.calls[0].request.content)
+    assert body == {"description": "kids at the beach"}
+    # marked done: a second apply plans nothing for enrich
+    again = writeback.apply(settings, ledger, immich, {"enrich"}, dry_run=False)
+    assert again.selected == 0
+
+
+def test_rejudge_resets_enrichment(tmp_path):
+    ledger = _seed_enrichable(tmp_path)
+    ledger.mark_enriched([A])
+    assert ledger.unenriched_rows() == []
+    ledger.record_triage(A, _verdict(caption="new caption"), "test-model", None)
+    rows = ledger.unenriched_rows()
+    assert len(rows) == 1 and rows[0]["caption"] == "new caption"

@@ -59,6 +59,7 @@ BUCKET_GROUPS: dict[str, str] = {
     "album": "stars",
     "burst_loser": "stacks",
     "burst_stack": "stacks",
+    "enrich": "enrich",
 }
 
 #: Every group name :func:`apply` accepts.
@@ -103,6 +104,7 @@ class ApplyStats:
         assets_tagged: Asset/tag attachments made.
         tags_resolved: Tag names resolved to ids.
         stacks_created: Burst stacks created.
+        enriched: Assets whose caption/keywords were written.
         dry_run: Whether this was a rehearsal.
         actions: The selected actions, in execution order.
     """
@@ -116,6 +118,7 @@ class ApplyStats:
     tags_resolved: int = 0
     stacks_created: int = 0
     album_assets: int = 0
+    enriched: int = 0
     dry_run: bool = True
     actions: list[Action] = field(default_factory=list)
 
@@ -240,6 +243,50 @@ def _stack_actions(ledger: Ledger, unapplied_only: bool) -> list[Action]:
     return actions
 
 
+def _enrich_actions(
+    ledger: Ledger,
+    *,
+    write_captions: bool,
+    keyword_tags: bool,
+    keyword_prefix: str,
+) -> list[Action]:
+    """Caption/keyword write-backs for every triaged photo not yet enriched.
+
+    Captions only ever land on an EMPTY Immich description (as captured at
+    scan time) — a description the user wrote is never overwritten. Keywords
+    become ordinary Immich tags, nested under ``keyword_prefix`` when one is
+    set, so they browse and filter exactly like hand-made tags.
+    """
+    if not write_captions and not keyword_tags:
+        return []
+    actions: list[Action] = []
+    for row in ledger.unenriched_rows():
+        asset_id = str(row["asset_id"])
+        ops: list[dict[str, Any]] = []
+        pieces: list[str] = []
+        caption = str(row.get("caption") or "").strip()
+        if write_captions and caption and not (row.get("immich_description") or "").strip():
+            ops.append(_update_op(asset_id, description=caption))
+            pieces.append(f"caption {caption!r}")
+        if keyword_tags:
+            keywords = [str(k) for k in row.get("keywords") or []]
+            names = [f"{keyword_prefix}/{k}" if keyword_prefix else k for k in keywords]
+            ops.extend(_tag_op(asset_id, name) for name in names)
+            if names:
+                pieces.append(f"tags {', '.join(names)}")
+        if ops:
+            actions.append(
+                Action(
+                    asset_id=asset_id,
+                    burst_id=None,
+                    bucket="enrich",
+                    description=f"enrich {asset_id}: {'; '.join(pieces)}",
+                    api_ops=ops,
+                )
+            )
+    return actions
+
+
 def _album_action(ledger: Ledger, album: str, min_stars: int) -> Action | None:
     """One idempotent group action collecting starred photos into an album.
 
@@ -272,6 +319,9 @@ def plan(
     album: str | None = None,
     album_min_stars: int = 5,
     favorite_five: bool = True,
+    write_captions: bool = False,
+    keyword_tags: bool = False,
+    keyword_prefix: str = "kw",
 ) -> list[Action]:
     """Describe every Immich change the ledger's decisions call for.
 
@@ -283,6 +333,9 @@ def plan(
             disables the album action.
         album_min_stars: Smallest star band included in the album.
         favorite_five: Whether five-star photos are also favorited.
+        write_captions: Write captions to empty Immich descriptions.
+        keyword_tags: Write keywords as Immich tags under ``keyword_prefix``.
+        keyword_prefix: Parent tag for keywords; ``""`` writes them top-level.
 
     Returns:
         Actions in execution order: per-asset changes sorted by asset id,
@@ -296,6 +349,14 @@ def plan(
         if action is not None:
             actions.append(action)
     actions.extend(_stack_actions(ledger, unapplied_only))
+    actions.extend(
+        _enrich_actions(
+            ledger,
+            write_captions=write_captions,
+            keyword_tags=keyword_tags,
+            keyword_prefix=keyword_prefix,
+        )
+    )
     if album:
         album_action = _album_action(ledger, album, album_min_stars)
         if album_action is not None:
@@ -358,6 +419,9 @@ def apply(
         album=album_name or None,
         album_min_stars=settings.best_album_min_stars,
         favorite_five=settings.five_star_favorite,
+        write_captions=settings.write_captions,
+        keyword_tags=settings.keyword_tags,
+        keyword_prefix=settings.keyword_tag_prefix,
     )
     selected = [action for action in everything if action.group in groups]
     stats = ApplyStats(
@@ -436,6 +500,11 @@ def apply(
 
     if stacked:
         ledger.mark_stacked(stacked)
+    enrich_ids = {a.asset_id for a in selected if a.bucket == "enrich" and a.asset_id}
+    enriched_done = sorted(enrich_ids - failed_assets)
+    if enriched_done:
+        ledger.mark_enriched(enriched_done)
+        stats.enriched = len(enriched_done)
     done = sorted({a.asset_id for a in selected if a.asset_id} - failed_assets)
     if done:
         ledger.mark_applied(done)

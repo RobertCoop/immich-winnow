@@ -216,6 +216,8 @@ file works too — never commit it).
 | `CACHE_DIR` | `.winnow-cache` | Resized thumbnails (~120 KB per photo). |
 | `CANDIDATE_SCORE_MIN` | `8` | Triage score floor for entering stage 2. Lower = rank more photos. |
 | `SCORING_LIMIT` | `0` | Max already-scored photos re-judged as ranking anchors per run (new photos always score). `0` = unlimited. |
+| `WRITE_CAPTIONS` | `true` | Write each photo's AI caption into its Immich description — only when the description is empty. |
+| `KEYWORD_TAGS` | `false` | Write keywords as real Immich tags under `kw/` (`KEYWORD_TAG_PREFIX=""` for plain top-level tags). |
 | `FIVE_STAR_FRACTION` | `0.05` | Share of ranked candidates crowned five-star (per run, Opus-refined). |
 | `FOUR_STAR_FRACTION` | `0.15` | Next band, straight from ranking evidence. |
 | `FULL_STAR_SPECTRUM` | `false` | Also assign ★★★ (remaining candidates), ★★ (ordinary keepers), ★ (poor but kept) — rates nearly every photo. |
@@ -288,6 +290,7 @@ bulk edit in the Immich UI over a tag's assets.
 | Confident rejects | archived + tag `winnow/reject` (+ rating −1 on servers that persist it — Immich v3.1 silently drops −1) | unarchive / untag |
 | Confident non-photos — screenshots, documents, memes, and other (wallpapers, illustrations, renders) | archived + tag `winnow/screenshot`, `winnow/document`, `winnow/meme` or `winnow/other` | unarchive / untag |
 | Burst also-rans | stacked under the winner + tag `winnow/burst-loser` | un-stack / untag |
+| Every triaged photo | caption → description (only when empty; `WRITE_CAPTIONS`) and keywords → `kw/*` tags (opt-in `KEYWORD_TAGS`) | clear description / untag |
 | ★★★★★ finalists | rating 5 + favorite (unless `FIVE_STAR_FAVORITE=false`) + tag `winnow/best` | clear rating / unfavorite / untag |
 | Starred photos | collected into the `Five-Stars` album (`BEST_ALBUM`; `BEST_ALBUM_MIN_STARS=4` includes ★★★★; `BEST_ALBUM=` disables) | remove from album |
 | ★★★★ finalists | rating 4 (no tag — they are indistinguishable from your own 4-star ratings) | clear rating |
@@ -298,6 +301,11 @@ reject or an unsure "that's a meme" stays in the untouched middle.
 
 ## Design notes
 
+- **Captions and keywords are free riders.** The triage judge is already
+  looking at every photo, so it also writes a one-line caption and search
+  keywords in the same call (a few extra output tokens). Captions land in the
+  Immich description only when it's empty — your own words are never
+  overwritten — and keywords become ordinary, fully filterable Immich tags.
 - **Star bands scale with your library.** Five/four-star counts are
   fractions of the ranked candidate pool (5% / 15% by default — roughly the
   top 0.4% / 1.2% of a typical library), not a fixed quota. Opus refines the

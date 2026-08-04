@@ -84,6 +84,13 @@ class Settings(BaseSettings):
     best_album_min_stars: int = 5
     # Whether five-star photos are also marked as Immich favorites.
     five_star_favorite: bool = True
+    # Write each photo's caption into its Immich description — only when the
+    # description is empty, so your own words are never overwritten.
+    write_captions: bool = True
+    # Also write keywords as Immich tags under keyword_tag_prefix. Off by
+    # default: a big library mints hundreds of tags in the tag browser.
+    keyword_tags: bool = False
+    keyword_tag_prefix: str = "kw"
 
     @property
     def immich_base(self) -> str:

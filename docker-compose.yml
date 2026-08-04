@@ -81,6 +81,11 @@ services:
       # BEST_ALBUM_MIN_STARS: "5"        # 5 = five-star only, 4 = include four-star
       # FIVE_STAR_FAVORITE: "true"       # also favorite five-star photos
 
+      # ---- captions & keyword tags (collected free during triage) -------------
+      # WRITE_CAPTIONS: "true"           # caption -> Immich description (only when empty)
+      # KEYWORD_TAGS: "false"            # keywords -> real Immich tags under the prefix
+      # KEYWORD_TAG_PREFIX: "kw"         # "" writes keywords as plain top-level tags
+
       # ---- command-flag equivalents (WINNOW_*) ---------------------------------
       # Every CLI flag is also an env var, so the watcher can be tuned here
       # without a custom `command:`. The most useful ones:

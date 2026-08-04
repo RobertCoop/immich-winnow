@@ -20,13 +20,21 @@ Confidence = Literal["low", "medium", "high"]
 
 
 class TriageVerdict(BaseModel):
-    """Stage-1 verdict for a single photo."""
+    """Stage-1 verdict for a single photo.
+
+    ``caption`` and ``keywords`` ride along in the same call: the judge is
+    already looking at the photo, so describing it costs a handful of output
+    tokens. They default to empty for compatibility with verdicts recorded
+    before enrichment existed.
+    """
 
     category: Category
     verdict: VerdictKind
     technical_score: int
     reasons: list[str]
     confidence: Confidence
+    caption: str = ""
+    keywords: list[str] = []
 
     @field_validator("technical_score")
     @classmethod
@@ -34,6 +42,16 @@ class TriageVerdict(BaseModel):
         if not 0 <= v <= 10:
             raise ValueError(f"technical_score must be 0-10, got {v}")
         return v
+
+    @field_validator("keywords")
+    @classmethod
+    def _normalize_keywords(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for keyword in v:
+            word = " ".join(str(keyword).lower().split())
+            if word and word not in cleaned:
+                cleaned.append(word)
+        return cleaned[:8]
 
 
 class BurstVerdict(BaseModel):

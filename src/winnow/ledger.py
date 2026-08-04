@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS assets (
     filename TEXT,
     taken_at TEXT,
     camera TEXT,
+    immich_description TEXT,
     width INTEGER,
     height INTEGER,
     burst_id TEXT,
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS triage (
     verdict TEXT,
     technical_score INTEGER,
     reasons TEXT,
+    caption TEXT,
+    keywords TEXT,
+    enriched_at TEXT,
     confidence TEXT,
     model TEXT,
     raw TEXT,
@@ -132,6 +136,7 @@ ASSET_COLUMNS: tuple[str, ...] = (
     "dhash",
     "thumb_path",
     "immich_rating",
+    "immich_description",
     "scanned_at",
 )
 
@@ -144,7 +149,11 @@ _SQL_VAR_CHUNK = 500
 
 #: Columns added after v0.1 databases were first written, as
 #: ``table -> {column: type}``. Applied on open so old ledgers keep working.
-_MIGRATIONS: dict[str, dict[str, str]] = {"bursts": {"applied_at": "TEXT"}}
+_MIGRATIONS: dict[str, dict[str, str]] = {
+    "bursts": {"applied_at": "TEXT"},
+    "assets": {"immich_description": "TEXT"},
+    "triage": {"caption": "TEXT", "keywords": "TEXT", "enriched_at": "TEXT"},
+}
 
 
 def _now() -> str:
@@ -388,13 +397,17 @@ class Ledger:
         self._conn.execute(
             """
             INSERT INTO triage (asset_id, category, verdict, technical_score, reasons,
+                                caption, keywords, enriched_at,
                                 confidence, model, raw, judged_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
             ON CONFLICT(asset_id) DO UPDATE SET
                 category = excluded.category,
                 verdict = excluded.verdict,
                 technical_score = excluded.technical_score,
                 reasons = excluded.reasons,
+                caption = excluded.caption,
+                keywords = excluded.keywords,
+                enriched_at = NULL,
                 confidence = excluded.confidence,
                 model = excluded.model,
                 raw = excluded.raw,
@@ -406,6 +419,8 @@ class Ledger:
                 verdict.verdict,
                 int(verdict.technical_score),
                 _dumps(list(verdict.reasons)),
+                verdict.caption or None,
+                _dumps(list(verdict.keywords)) if verdict.keywords else None,
                 verdict.confidence,
                 model,
                 raw if raw is None or isinstance(raw, str) else json.dumps(raw),
@@ -456,8 +471,44 @@ class Ledger:
         for row in cur.fetchall():
             data = dict(row)
             data["reasons"] = _loads(data.get("reasons")) or []
+            data["keywords"] = _loads(data.get("keywords")) or []
             rows.append(data)
         return rows
+
+    def unenriched_rows(self) -> list[dict[str, Any]]:
+        """Triage rows with a caption or keywords not yet written to Immich.
+
+        Joined with the asset's server-side description as captured at scan
+        time, so write-back can honor the never-overwrite rule.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT t.asset_id, t.caption, t.keywords, a.immich_description
+            FROM triage t JOIN assets a ON a.id = t.asset_id
+            WHERE t.enriched_at IS NULL
+              AND (t.caption IS NOT NULL OR t.keywords IS NOT NULL)
+            ORDER BY t.asset_id
+            """
+        )
+        rows = []
+        for row in cur.fetchall():
+            data = dict(row)
+            data["keywords"] = _loads(data.get("keywords")) or []
+            rows.append(data)
+        return rows
+
+    def mark_enriched(self, asset_ids: Sequence[str]) -> int:
+        """Stamp captions/keywords as written to Immich for these assets."""
+        ids = [str(asset_id) for asset_id in asset_ids]
+        if not ids:
+            return 0
+        stamp = _now()
+        cur = self._conn.executemany(
+            "UPDATE triage SET enriched_at = ? WHERE asset_id = ?",
+            [(stamp, asset_id) for asset_id in ids],
+        )
+        self._conn.commit()
+        return cur.rowcount if cur.rowcount is not None else len(ids)
 
     def burst_rows(self) -> list[dict[str, Any]]:
         """Every burst verdict, ``reject_ids`` decoded back into a list."""

@@ -329,6 +329,9 @@ def run_scan(
                     # Immich v3 keeps the star rating on exifInfo; the top-level
                     # field exists in the DTO but stays null even when rated.
                     "immich_rating": exif.get("rating", asset.get("rating")),
+                    # Captured so caption write-back can honor its rule of
+                    # never overwriting a description the user already wrote.
+                    "immich_description": exif.get("description") or None,
                 }
             )
             scanned_ids.append(asset_id)

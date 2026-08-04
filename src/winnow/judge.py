@@ -187,6 +187,14 @@ Give one to three short, concrete phrases naming what you actually see:
 "subject motion blur", "backlit, face in shadow", "both children looking away",
 "clean rim light on the dog". Do not hedge and do not restate the verdict.
 
+CAPTION AND KEYWORDS
+Also describe the photo for search. caption: one plain factual sentence, at
+most ~120 characters, naming the subject, setting and action — never start
+with "A photo of" or "An image of". keywords: three to six lowercase words or
+short phrases a person would search for (subjects, scene, activity, notable
+objects; e.g. "beach", "golden retriever", "birthday cake"). No hashtags, no
+duplicates of the caption verbatim, no quality judgments.
+
 """ + _JSON_ONLY
 
 BURST_SYSTEM = """\

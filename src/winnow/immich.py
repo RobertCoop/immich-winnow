@@ -197,6 +197,7 @@ class ImmichClient:
         rating: int | None = UNSET,
         is_favorite: bool = UNSET,
         visibility: str = UNSET,
+        description: str = UNSET,
     ) -> dict:
         """Update an asset, sending only the fields explicitly passed in.
 
@@ -205,6 +206,7 @@ class ImmichClient:
             rating: ``1``-``5``, ``-1`` for rejected, or ``None`` to clear.
             is_favorite: Favorite flag.
             visibility: ``"archive"`` or ``"timeline"``.
+            description: Asset description (the caption shown in the UI).
 
         Returns:
             The updated asset DTO.
@@ -216,6 +218,8 @@ class ImmichClient:
             payload["isFavorite"] = is_favorite
         if visibility is not UNSET:
             payload["visibility"] = visibility
+        if description is not UNSET:
+            payload["description"] = description
         return self._json("PUT", f"/assets/{asset_id}", json=payload)
 
     def duplicates(self) -> list[dict]:

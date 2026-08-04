@@ -62,7 +62,7 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 
 #: Default value of ``apply --buckets``: everything write-back knows about.
-DEFAULT_BUCKETS = "reject,nonphoto,stars,stacks"
+DEFAULT_BUCKETS = "reject,nonphoto,stars,stacks,enrich"
 
 #: Rows of the change table printed before it is truncated. The full list
 #: lives in the HTML report, which is the reviewable surface.
@@ -400,7 +400,7 @@ def _wait_for_batches(
             print_stats("Ingested", stats)
             print_cost(ses.settings.triage_model, stats, batch=True)
             if apply_now:
-                _apply_now(ses, {"reject", "nonphoto", "stacks"})
+                _apply_now(ses, {"reject", "nonphoto", "stacks", "enrich"})
             continue
         console.print(
             f"[dim]{len(open_batches)} batch(es) still processing; "
@@ -471,7 +471,7 @@ def triage(
             stats = run_triage_direct(ses.settings, ses.ledger, ses.claude, limit, report)
         model = ses.settings.triage_model
         if apply_now:
-            _apply_now(ses, {"reject", "nonphoto", "stacks"})
+            _apply_now(ses, {"reject", "nonphoto", "stacks", "enrich"})
     print_stats("Triage", stats)
     print_cost(model, stats)
 
@@ -542,7 +542,7 @@ def poll(
             stats = ingest_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
         model = ses.settings.triage_model
         if apply_now:
-            _apply_now(ses, {"reject", "nonphoto", "stacks"})
+            _apply_now(ses, {"reject", "nonphoto", "stacks", "enrich"})
     print_stats("Ingested", stats)
     print_cost(model, stats, batch=True)
 
@@ -688,6 +688,9 @@ def apply(
                 album=album_name or None,
                 album_min_stars=ses.settings.best_album_min_stars,
                 favorite_five=ses.settings.five_star_favorite,
+                write_captions=ses.settings.write_captions,
+                keyword_tags=ses.settings.keyword_tags,
+                keyword_prefix=ses.settings.keyword_tag_prefix,
             )
             if a.group in groups
         ]
