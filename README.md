@@ -267,7 +267,14 @@ uv run winnow report --out winnow-report.html        # HTML contact sheet — re
 uv run winnow apply --dry-run                        # see exactly what would change (-v for the full list)
 uv run winnow apply --live --buckets reject,stars    # write back to Immich (asks first; -y to skip)
 uv run winnow status                                 # ledger summary any time
+uv run winnow rejudge --missing-captions -y          # forget pre-caption verdicts, then re-triage
 ```
+
+`rejudge` selectively forgets judgments (local ledger only — Immich is never
+touched) so a stage runs again: `--stage triage|rank|finals|all`, filtered by
+`--after/--before`, `--bucket`, or `--missing-captions` — the back-catalog
+captioning flow is `rejudge --missing-captions -y` followed by
+`triage --batch --wait --apply`.
 
 `triage`, `poll --ingest` and `finals` all take `--apply` to write their
 changes to Immich immediately instead of waiting for a reviewed `apply`;

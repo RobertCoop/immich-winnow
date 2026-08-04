@@ -929,6 +929,108 @@ def watch(
 
 
 @app.command()
+def rejudge(
+    stage: Annotated[
+        str,
+        typer.Option(
+            "--stage",
+            envvar="WINNOW_STAGE",
+            help="What to forget: triage (stage 1, incl. burst contests), "
+            "rank (stage 2 sets/pairs/scores), finals (stage 3 pairs), or all.",
+        ),
+    ] = "triage",
+    after: Annotated[
+        str | None,
+        typer.Option(
+            "--after", envvar="WINNOW_AFTER", help="Only photos taken on/after this date."
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option(
+            "--before", envvar="WINNOW_BEFORE", help="Only photos taken before this date."
+        ),
+    ] = None,
+    bucket: Annotated[
+        str | None,
+        typer.Option(
+            "--bucket",
+            envvar="WINNOW_BUCKET",
+            help="Only photos currently in this decision bucket (e.g. middle, reject).",
+        ),
+    ] = None,
+    missing_captions: Annotated[
+        bool,
+        typer.Option(
+            "--missing-captions",
+            envvar="WINNOW_MISSING_CAPTIONS",
+            help="Only verdicts recorded before captions existed — the "
+            "back-catalog captioning filter.",
+        ),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", envvar="WINNOW_YES", help="Skip the confirmation prompt."),
+    ] = False,
+) -> None:
+    """Forget judgments so a stage runs again — for new models, new prompts,
+    or captioning a back catalog. Touches only the local ledger, never Immich.
+    """
+    if stage not in ("triage", "rank", "finals", "all"):
+        raise typer.BadParameter("--stage must be triage, rank, finals, or all")
+    filtered = bool(after or before or bucket or missing_captions)
+    if filtered and stage in ("rank", "finals"):
+        raise typer.BadParameter(
+            "filters only apply to --stage triage/all — rank and finals are "
+            "relational and can only be cleared whole"
+        )
+
+    with session() as ses:
+        targets: list[str] = []
+        if stage in ("triage", "all"):
+            targets = ses.ledger.select_rejudge_targets(
+                after=after, before=before, bucket=bucket, missing_captions=missing_captions
+            )
+        pieces = []
+        if stage in ("triage", "all"):
+            pieces.append(f"{len(targets):,} stage-1 verdict(s)")
+        if stage in ("rank", "all"):
+            pieces.append("every best-worst set, rank pair and fitted score")
+        if stage in ("finals", "all"):
+            pieces.append("every finals head-to-head")
+        summary = " + ".join(pieces)
+        if stage in ("triage", "all") and not targets and stage == "triage":
+            console.print("Nothing matches — no verdicts to forget.")
+            return
+
+        console.print(f"Will forget: {summary}.")
+        console.print(
+            "[dim]This deletes paid judgments from the local ledger (Immich is "
+            "untouched); the next run re-judges and re-spends.[/dim]"
+        )
+        if not yes:
+            typer.confirm("Proceed?", abort=True)
+
+        if stage in ("triage", "all") and targets:
+            cleared = ses.ledger.clear_triage(targets)
+            console.print(f"Forgot {cleared:,} stage-1 verdict(s).")
+        if stage in ("rank", "all"):
+            ses.ledger.clear_rank()
+            console.print("Forgot stage 2 (sets, pairs, scores).")
+        if stage in ("finals", "all"):
+            ses.ledger.clear_finals()
+            console.print("Forgot stage 3 (head-to-heads).")
+
+    hint = {
+        "triage": "winnow triage --batch --wait  (then rank/finals, or winnow run)",
+        "rank": "winnow rank",
+        "finals": "winnow finals",
+        "all": "winnow run",
+    }[stage]
+    console.print(f"Next: [bold]{hint}[/bold]")
+
+
+@app.command()
 def status() -> None:
     """Show what the ledger currently holds."""
     with session() as ses:

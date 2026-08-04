@@ -709,6 +709,90 @@ class Ledger:
             rows.append(data)
         return rows
 
+    def select_rejudge_targets(
+        self,
+        *,
+        after: str | None = None,
+        before: str | None = None,
+        bucket: str | None = None,
+        missing_captions: bool = False,
+    ) -> list[str]:
+        """Asset ids whose stage-1 judgment matches the rejudge filters.
+
+        Filters combine with AND. ``after``/``before`` bound the taken date
+        (ISO prefixes compare correctly against stored timestamps),
+        ``bucket`` matches the asset's current decision, and
+        ``missing_captions`` selects verdicts recorded before captions existed.
+        Only assets that HAVE a triage row are returned — anything unjudged is
+        already pending.
+        """
+        sql = ["SELECT t.asset_id FROM triage t JOIN assets a ON a.id = t.asset_id"]
+        clauses: list[str] = []
+        params: list[Any] = []
+        if bucket is not None:
+            sql.append("JOIN decisions d ON d.asset_id = t.asset_id")
+            clauses.append("d.bucket = ?")
+            params.append(bucket)
+        if after is not None:
+            clauses.append("a.taken_at >= ?")
+            params.append(after)
+        if before is not None:
+            clauses.append("a.taken_at < ?")
+            params.append(before)
+        if missing_captions:
+            clauses.append("t.caption IS NULL")
+        if clauses:
+            sql.append("WHERE " + " AND ".join(clauses))
+        sql.append("ORDER BY t.asset_id")
+        cur = self._conn.execute(" ".join(sql), params)
+        return [str(row["asset_id"]) for row in cur.fetchall()]
+
+    def clear_triage(self, asset_ids: Sequence[str]) -> int:
+        """Delete stage-1 verdicts so the assets are re-judged next triage.
+
+        Also drops the burst verdict of any burst containing one of the
+        assets, so its contest is replayed too. Decisions are left alone —
+        the re-judgment overwrites them (an identical verdict keeps its
+        applied stamp, a changed one clears it).
+        """
+        ids = [str(asset_id) for asset_id in asset_ids]
+        removed = 0
+        for chunk in _chunked(ids):
+            marks = ", ".join("?" for _ in chunk)
+            burst_rows = self._conn.execute(
+                f"SELECT DISTINCT burst_id FROM assets "
+                f"WHERE id IN ({marks}) AND burst_id IS NOT NULL",
+                chunk,
+            ).fetchall()
+            burst_ids = [str(row["burst_id"]) for row in burst_rows]
+            if burst_ids:
+                burst_marks = ", ".join("?" for _ in burst_ids)
+                self._conn.execute(
+                    f"DELETE FROM bursts WHERE burst_id IN ({burst_marks})", burst_ids
+                )
+            cur = self._conn.execute(f"DELETE FROM triage WHERE asset_id IN ({marks})", chunk)
+            removed += cur.rowcount
+        self._conn.commit()
+        return removed
+
+    def clear_rank(self) -> int:
+        """Forget stage 2: every best-worst set, rank pair, and fitted score.
+
+        Stars and star decisions survive — they belong to the finals, and the
+        sticky rules there decide their fate on the next run.
+        """
+        removed = self._conn.execute("DELETE FROM bws_sets").rowcount
+        removed += self._conn.execute("DELETE FROM pairs WHERE stage = 'rank'").rowcount
+        self._conn.execute("UPDATE scores SET bt_score = NULL, rank = NULL")
+        self._conn.commit()
+        return removed
+
+    def clear_finals(self) -> int:
+        """Forget stage 3's head-to-head outcomes (star decisions survive)."""
+        cur = self._conn.execute("DELETE FROM pairs WHERE stage = 'finals'")
+        self._conn.commit()
+        return cur.rowcount
+
     def clear_decisions(self, asset_ids: Sequence[str]) -> int:
         """Delete decision rows outright; returns how many rows were removed.
 

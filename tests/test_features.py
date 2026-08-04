@@ -647,3 +647,103 @@ def test_rejudge_resets_enrichment(tmp_path):
     ledger.record_triage(A, _verdict(caption="new caption"), "test-model", None)
     rows = ledger.unenriched_rows()
     assert len(rows) == 1 and rows[0]["caption"] == "new caption"
+
+
+# ----------------------------------------------------------------------
+# rejudge
+# ----------------------------------------------------------------------
+
+
+def _seed_rejudge(db_path) -> Ledger:
+    """Two captioned photos, two pre-caption photos (one in a burst), plus
+    rank/finals evidence — a miniature of a real pre-v0.5 ledger."""
+    ledger = Ledger(db_path)
+    rows = []
+    for i, aid_ in enumerate(("cap1", "cap2", "old1", "old2")):
+        row = _asset_row(aid_)
+        row["taken_at"] = f"2024-0{i + 1}-15T10:00:00+00:00"
+        rows.append(row)
+    ledger.upsert_assets(rows)
+    ledger.assign_burst("burst-x", ["old2"])
+    for aid_ in ("cap1", "cap2"):
+        ledger.record_triage(aid_, _verdict(), "m", None)
+    for aid_ in ("old1", "old2"):
+        ledger.record_triage(aid_, _verdict(caption="", keywords=()), "m", None)
+    ledger.record_burst("burst-x", "old2", [], "note", "m")
+    ledger.set_decision("old1", "middle", {})
+    ledger.set_decision("cap1", "reject", {})
+    ledger.record_pair("cap1", "cap2", "cap1", "rank", "m")
+    ledger.record_pair("cap1", "old1", "cap1", "finals", "m")
+    ledger.record_bws(1, ["cap1", "cap2"], "cap1", "cap2", "m")
+    ledger.upsert_scores({"cap1": (2.0, 1), "cap2": (1.0, 2)})
+    ledger.set_stars("cap1", 5)
+    return ledger
+
+
+def test_select_rejudge_targets_filters(tmp_path):
+    ledger = _seed_rejudge(tmp_path / "rj.db")
+    assert ledger.select_rejudge_targets() == ["cap1", "cap2", "old1", "old2"]
+    assert ledger.select_rejudge_targets(missing_captions=True) == ["old1", "old2"]
+    assert ledger.select_rejudge_targets(bucket="reject") == ["cap1"]
+    assert ledger.select_rejudge_targets(after="2024-03-01") == ["old1", "old2"]
+    assert ledger.select_rejudge_targets(before="2024-02-01") == ["cap1"]
+    assert ledger.select_rejudge_targets(missing_captions=True, before="2024-04-01") == ["old1"]
+
+
+def test_clear_triage_drops_verdicts_and_affected_bursts(tmp_path):
+    ledger = _seed_rejudge(tmp_path / "rj.db")
+    cleared = ledger.clear_triage(["old1", "old2"])
+    assert cleared == 2
+    remaining = {r["asset_id"] for r in ledger.triage_rows()}
+    assert remaining == {"cap1", "cap2"}
+    assert ledger.burst_rows() == []  # old2's burst contest is replayed too
+    buckets = {r["asset_id"]: r["bucket"] for r in ledger.decisions()}
+    assert buckets["old1"] == "middle"  # decisions survive until re-judged
+
+
+def test_clear_rank_keeps_stars(tmp_path):
+    ledger = _seed_rejudge(tmp_path / "rj.db")
+    ledger.clear_rank()
+    assert ledger.bws_rows() == []
+    stages = {r["stage"] for r in ledger.pair_rows()}
+    assert stages == {"finals"}
+    scores = {r["asset_id"]: r for r in ledger.score_rows()}
+    assert scores["cap1"]["bt_score"] is None
+    assert scores["cap1"]["stars"] == 5  # stars belong to the finals
+
+
+def test_clear_finals_only_touches_finals_pairs(tmp_path):
+    ledger = _seed_rejudge(tmp_path / "rj.db")
+    ledger.clear_finals()
+    stages = {r["stage"] for r in ledger.pair_rows()}
+    assert stages == {"rank"}
+    assert len(ledger.bws_rows()) == 1
+
+
+def test_rejudge_cli_missing_captions(settings_env):
+    settings = load_settings()
+    _seed_rejudge(settings.db_path).close()
+
+    result = CliRunner().invoke(
+        cli_mod.app, ["rejudge", "--missing-captions", "-y"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    assert "2" in result.output and "Forgot" in result.output
+
+    with Ledger(settings.db_path) as ledger:
+        assert {r["asset_id"] for r in ledger.triage_rows()} == {"cap1", "cap2"}
+
+
+def test_rejudge_cli_requires_confirmation(settings_env):
+    settings = load_settings()
+    _seed_rejudge(settings.db_path).close()
+    result = CliRunner().invoke(cli_mod.app, ["rejudge"], input="n\n")
+    assert result.exit_code != 0
+    with Ledger(settings.db_path) as ledger:
+        assert len(ledger.triage_rows()) == 4  # nothing forgotten
+
+
+def test_rejudge_cli_rejects_filters_on_rank(settings_env):
+    result = CliRunner().invoke(cli_mod.app, ["rejudge", "--stage", "rank", "--bucket", "middle"])
+    assert result.exit_code != 0
+    assert "filters only apply" in result.output
