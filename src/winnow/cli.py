@@ -200,9 +200,18 @@ def session(*, immich: bool = False, judge: bool = False) -> Iterator[Session]:
         ledger.close()
 
 
+#: Substrings that mark a progress line as an error worth keeping on screen.
+_FAILURE_MARKERS = ("failed", "could not")
+
+
 @contextmanager
 def progress_reporter(label: str) -> Iterator[ProgressFn]:
-    """Yield an ``on_progress`` callback backed by a transient rich spinner."""
+    """Yield an ``on_progress`` callback backed by a transient rich spinner.
+
+    Ordinary progress lines live and die on the spinner; failure lines are
+    also printed permanently, because a transient spinner erases everything
+    when it exits and an error nobody saw is an error nobody can act on.
+    """
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -214,6 +223,9 @@ def progress_reporter(label: str) -> Iterator[ProgressFn]:
         task = progress.add_task(label, total=None)
 
         def report(message: str) -> None:
+            lowered = message.lower()
+            if any(marker in lowered for marker in _FAILURE_MARKERS):
+                progress.console.print(f"[yellow]! {message}[/yellow]")
             progress.update(task, description=f"{label} · {message}"[:90], advance=1)
 
         yield report

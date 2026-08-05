@@ -510,5 +510,8 @@ def apply(
         ledger.mark_applied(done)
     stats.applied += len(done)
     stats.failed += len(failed_assets)
-    emit(on_progress, f"applied {stats.applied} action(s), {stats.failed} failed")
+    summary = f"applied {stats.applied} action(s)"
+    if stats.failed:
+        summary += f", {stats.failed} failed"
+    emit(on_progress, summary)
     return stats

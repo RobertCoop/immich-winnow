@@ -233,13 +233,22 @@ class ImmichClient:
         """Return every tag DTO known to the server."""
         return self._json("GET", "/tags")
 
+    #: Names per ``PUT /api/tags`` request. Creating thousands of tags in one
+    #: call (a first keyword-tag run over a big library) takes the server
+    #: longer than the client timeout; chunks this size finish comfortably.
+    TAG_UPSERT_CHUNK = 200
+
     def upsert_tags(self, names: list[str]) -> dict[str, str]:
         """Create tags if missing and map each requested name to its tag id.
 
-        Uses ``PUT /api/tags`` (bulk upsert, nested paths via ``/``). Servers
-        that predate that endpoint answer ``404``; those fall back to one
-        ``POST /api/tags`` per name followed by a lookup against
-        ``GET /api/tags``.
+        Uses ``PUT /api/tags`` (bulk upsert, nested paths via ``/``) in chunks
+        of :attr:`TAG_UPSERT_CHUNK`, so one huge request cannot time out and
+        one bad chunk cannot take down the rest. Names left unresolved — a
+        chunk that errored, or a server whose upsert answered with a subset —
+        are filled in from ``GET /api/tags``, which also recovers tags the
+        server created but never confirmed. Servers that predate the bulk
+        endpoint answer ``404``; those fall back to one ``POST /api/tags`` per
+        name followed by the same lookup.
 
         Args:
             names: Tag values, e.g. ``["winnow/reject", "winnow/best"]``.
@@ -251,17 +260,17 @@ class ImmichClient:
         wanted = list(names)
         if not wanted:
             return {}
-        try:
-            dtos = self._json("PUT", "/tags", json={"tags": wanted})
-        except ImmichError as exc:
-            if exc.status_code != 404:
-                raise
-            return self._upsert_tags_fallback(wanted)
-
-        resolved = _match_tags(wanted, dtos)
+        resolved: dict[str, str] = {}
+        for start in range(0, len(wanted), self.TAG_UPSERT_CHUNK):
+            chunk = wanted[start : start + self.TAG_UPSERT_CHUNK]
+            try:
+                dtos = self._json("PUT", "/tags", json={"tags": chunk})
+            except ImmichError as exc:
+                if exc.status_code == 404:
+                    return self._upsert_tags_fallback(wanted)
+                continue  # leave this chunk to the gap-fill below
+            resolved.update(_match_tags(chunk, dtos))
         if len(resolved) < len(wanted):
-            # Bulk upsert answered with a subset (e.g. only newly created
-            # tags); fill the gaps from the full tag list.
             resolved = {**_match_tags(wanted, self.list_tags()), **resolved}
         return resolved
 

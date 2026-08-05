@@ -502,15 +502,63 @@ def test_upsert_tags_omits_unresolvable_names(
     assert client.upsert_tags(["winnow/reject"]) == {}
 
 
-def test_upsert_tags_non_404_error_propagates(
+def test_upsert_tags_chunk_error_recovers_from_listing(
     mock_api: respx.MockRouter, client: ImmichClient
 ) -> None:
+    # A failed chunk must not raise or poison the rest: unresolved names are
+    # filled from GET /tags, and the pre-endpoint POST fallback stays unused.
     mock_api.put("/tags").mock(return_value=httpx.Response(500, text="server on fire"))
     post_route = mock_api.post("/tags")
-    with pytest.raises(ImmichError) as excinfo:
-        client.upsert_tags(["winnow/reject"])
-    assert excinfo.value.status_code == 500
+    mock_api.get("/tags").mock(
+        return_value=httpx.Response(200, json=[{"id": "t1", "value": "winnow/reject"}])
+    )
+    assert client.upsert_tags(["winnow/reject"]) == {"winnow/reject": "t1"}
     assert post_route.call_count == 0
+
+
+def test_upsert_tags_sends_chunks(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    client.TAG_UPSERT_CHUNK = 2
+    route = mock_api.put("/tags").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=[
+                {"id": f"id-{name}", "value": name}
+                for name in json.loads(request.content)["tags"]
+            ],
+        )
+    )
+    names = [f"kw/{i}" for i in range(5)]
+    mapping = client.upsert_tags(names)
+    assert route.call_count == 3
+    assert body_of(route, 0) == {"tags": ["kw/0", "kw/1"]}
+    assert body_of(route, 2) == {"tags": ["kw/4"]}
+    assert mapping == {name: f"id-{name}" for name in names}
+
+
+def test_upsert_tags_timeout_recovers_created_tags(
+    mock_api: respx.MockRouter, client: ImmichClient
+) -> None:
+    # The production failure mode: the server creates the tags but the client
+    # times out waiting, so the ids must come from the follow-up listing.
+    client.TAG_UPSERT_CHUNK = 2
+    mock_api.put("/tags").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow tag creation"),
+            httpx.Response(200, json=[{"id": "t3", "value": "kw/c"}]),
+        ]
+    )
+    mock_api.get("/tags").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": "t1", "value": "kw/a"},
+                {"id": "t2", "value": "kw/b"},
+                {"id": "t3", "value": "kw/c"},
+            ],
+        )
+    )
+    mapping = client.upsert_tags(["kw/a", "kw/b", "kw/c"])
+    assert mapping == {"kw/a": "t1", "kw/b": "t2", "kw/c": "t3"}
 
 
 def test_tag_assets(mock_api: respx.MockRouter, client: ImmichClient) -> None:

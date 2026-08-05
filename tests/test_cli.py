@@ -768,3 +768,14 @@ def test_apply_live_is_resumable(
     output = plain(runner.invoke(app, ["apply", "--live", "--yes", "--buckets", "reject"]).stdout)
     assert immich_api["update_asset"].call_count == calls_before
     assert "Nothing to write back" in output
+
+
+def test_progress_reporter_persists_failure_lines() -> None:
+    """Errors must outlive the transient spinner; routine lines must not."""
+    with cli.console.capture() as capture, cli.progress_reporter("apply") as report:
+        report("update a1 failed: HTTP 500")
+        report("tag winnow/reject could not be resolved")
+        report("42 asset(s) updated")
+    output = ANSI.sub("", capture.get())
+    assert "! update a1 failed: HTTP 500" in output
+    assert "! tag winnow/reject could not be resolved" in output
