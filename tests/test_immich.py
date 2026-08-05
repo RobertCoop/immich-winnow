@@ -581,6 +581,25 @@ def test_tag_assets_error(mock_api: respx.MockRouter, client: ImmichClient) -> N
     assert excinfo.value.status_code == 404
 
 
+def test_tag_assets_sends_chunks(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    # A popular tag's full asset list in one request outlives the server;
+    # attachment is idempotent, so slicing it up costs nothing but requests.
+    client.TAG_ASSETS_CHUNK = 2
+    route = mock_api.put("/tags/t1/assets").mock(return_value=httpx.Response(200, json=[]))
+    client.tag_assets("t1", ["a1", "a2", "a3", "a4", "a5"])
+    assert route.call_count == 3
+    assert body_of(route, 0) == {"ids": ["a1", "a2"]}
+    assert body_of(route, 2) == {"ids": ["a5"]}
+
+
+def test_untag_assets_sends_chunks(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    client.TAG_ASSETS_CHUNK = 2
+    route = mock_api.delete("/tags/t1/assets").mock(return_value=httpx.Response(200, json=[]))
+    client.untag_assets("t1", ["a1", "a2", "a3"])
+    assert route.call_count == 2
+    assert body_of(route, 1) == {"ids": ["a3"]}
+
+
 def test_untag_assets(mock_api: respx.MockRouter, client: ImmichClient) -> None:
     route = mock_api.delete("/tags/t1/assets").mock(return_value=httpx.Response(200, json=[]))
     assert client.untag_assets("t1", ["a1", "a2"]) is None

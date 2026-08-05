@@ -285,17 +285,29 @@ class ImmichClient:
                     raise
         return _match_tags(names, self.list_tags())
 
+    #: Asset ids per tag-attach/detach request. The server processes roughly
+    #: 30 attachments a second, so a popular tag's full asset list in one
+    #: request outlives the client timeout; chunks this size stay well inside.
+    TAG_ASSETS_CHUNK = 250
+
     def tag_assets(self, tag_id: str, asset_ids: list[str]) -> None:
-        """Add a tag to many assets. A no-op when ``asset_ids`` is empty."""
-        if not asset_ids:
-            return
-        self._request("PUT", f"/tags/{tag_id}/assets", json={"ids": list(asset_ids)})
+        """Add a tag to many assets, chunked. A no-op when ``asset_ids`` is empty.
+
+        Attaching a tag an asset already has is a server-side no-op, so a call
+        that dies mid-way is safe to repeat: completed chunks are simply
+        re-confirmed on the retry.
+        """
+        ids = list(asset_ids)
+        for start in range(0, len(ids), self.TAG_ASSETS_CHUNK):
+            chunk = ids[start : start + self.TAG_ASSETS_CHUNK]
+            self._request("PUT", f"/tags/{tag_id}/assets", json={"ids": chunk})
 
     def untag_assets(self, tag_id: str, asset_ids: list[str]) -> None:
-        """Remove a tag from many assets. A no-op when ``asset_ids`` is empty."""
-        if not asset_ids:
-            return
-        self._request("DELETE", f"/tags/{tag_id}/assets", json={"ids": list(asset_ids)})
+        """Remove a tag from many assets, chunked. A no-op when empty."""
+        ids = list(asset_ids)
+        for start in range(0, len(ids), self.TAG_ASSETS_CHUNK):
+            chunk = ids[start : start + self.TAG_ASSETS_CHUNK]
+            self._request("DELETE", f"/tags/{tag_id}/assets", json={"ids": chunk})
 
     def delete_tag(self, tag_id: str) -> None:
         """Delete a tag (assets are untouched)."""
