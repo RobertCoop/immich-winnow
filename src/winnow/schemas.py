@@ -10,7 +10,6 @@ leak into the generated JSON schema.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
@@ -130,16 +129,13 @@ def output_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
     return schema
 
 
-_THINK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-
-
 def parse_verdict(text: str, model_cls: type[BaseModel]) -> Any:
     """Parse a model's JSON reply into a verdict instance.
 
-    Tolerates surrounding prose, ``<think>...</think>`` reasoning blocks, or
-    markdown fences by extracting the first balanced JSON object from the text.
+    Tolerates surrounding prose or markdown fences by extracting the first
+    balanced JSON object from the text.
     """
-    text = _THINK_PATTERN.sub("", text).strip()
+    text = text.strip()
     try:
         return model_cls.model_validate(json.loads(text))
     except (json.JSONDecodeError, ValueError):

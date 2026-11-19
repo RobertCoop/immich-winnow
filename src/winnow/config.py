@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5"
@@ -26,10 +26,11 @@ EFFORT_THINKING_TOKENS: dict[Effort, int] = {
 class Settings(BaseSettings):
     """All knobs for a Winnow run.
 
-    Required values (no defaults): ``IMMICH_URL``, ``IMMICH_API_KEY``, and
-    either ``ANTHROPIC_API_KEY`` or ``OPENAI_BASE_URL``. Everything else has
-    sensible defaults and can be overridden via environment variables of the
-    same (upper-cased) name.
+    Required values (no defaults): ``IMMICH_URL``, ``IMMICH_API_KEY``.
+    Commands that call an AI backend also require either
+    ``ANTHROPIC_API_KEY`` or ``OPENAI_BASE_URL``. Everything else has sensible
+    defaults and can be overridden via environment variables of the same
+    (upper-cased) name.
     """
 
     model_config = SettingsConfigDict(
@@ -43,14 +44,12 @@ class Settings(BaseSettings):
     immich_api_key: str
     openai_base_url: str | None = None
     openai_api_key: str | None = None
-    anthropic_api_key: str | None = Field(default=None, validate_default=True)
+    anthropic_api_key: str | None = None
 
-    @field_validator("anthropic_api_key")
-    @classmethod
-    def _require_llm_credentials(cls, v: str | None, info: ValidationInfo) -> str | None:
-        if not v and not info.data.get("openai_base_url"):
+    def require_llm_credentials(self) -> None:
+        """Raise ValueError if neither OPENAI_BASE_URL nor ANTHROPIC_API_KEY is configured."""
+        if not self.openai_base_url and not self.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is required unless OPENAI_BASE_URL is set")
-        return v
 
     @property
     def use_openai(self) -> bool:
@@ -70,8 +69,12 @@ class Settings(BaseSettings):
     triage_effort: Effort = "low"
     rank_effort: Effort = "medium"
     finals_effort: Effort = "high"
+    # Default thinking token budgets for each non-zero effort level.
+    low_thinking_tokens: int = 1024
+    medium_thinking_tokens: int = 2048
+    high_thinking_tokens: int = 4096
     # Optional explicit cap on thinking tokens per stage (0 disables thinking).
-    # When None, derived from the stage's effort via EFFORT_THINKING_TOKENS.
+    # When None, derived from the stage's effort using the budgets above.
     triage_thinking_tokens: int | None = None
     rank_thinking_tokens: int | None = None
     finals_thinking_tokens: int | None = None
@@ -81,7 +84,14 @@ class Settings(BaseSettings):
     rank_max_tokens: int = 1024
     finals_max_tokens: int = 1024
 
-    @field_validator("triage_thinking_tokens", "rank_thinking_tokens", "finals_thinking_tokens")
+    @field_validator(
+        "low_thinking_tokens",
+        "medium_thinking_tokens",
+        "high_thinking_tokens",
+        "triage_thinking_tokens",
+        "rank_thinking_tokens",
+        "finals_thinking_tokens",
+    )
     @classmethod
     def _non_negative_thinking(cls, v: int | None) -> int | None:
         if v is not None and v < 0:
@@ -101,7 +111,12 @@ class Settings(BaseSettings):
         if explicit is not None:
             return explicit
         effort: Effort = getattr(self, f"{stage}_effort")
-        return EFFORT_THINKING_TOKENS[effort]
+        return {
+            "none": 0,
+            "low": self.low_thinking_tokens,
+            "medium": self.medium_thinking_tokens,
+            "high": self.high_thinking_tokens,
+        }[effort]
 
     def effort_for(self, stage: StageName) -> Effort:
         """Resolved effort label for ``stage`` (``'none'`` when thinking budget is 0)."""
@@ -196,8 +211,6 @@ class Settings(BaseSettings):
         return self.immich_url.rstrip("/")
 
 
-def load_settings(_env_file: Path | str | None = None, **overrides: object) -> Settings:
+def load_settings(**overrides: object) -> Settings:
     """Load settings from the environment / .env, applying overrides."""
-    if _env_file is not None:
-        return Settings(_env_file=_env_file, **overrides)  # type: ignore[arg-type]
     return Settings(**overrides)  # type: ignore[arg-type]

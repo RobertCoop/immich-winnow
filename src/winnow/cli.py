@@ -142,8 +142,10 @@ class Session:
 
     ``immich`` and ``judge`` are only created for the commands that ask for
     them, so ledger-only commands such as ``status`` and ``report`` open no
-    connections at all. They still need a valid configuration: every command
-    loads :class:`~winnow.config.Settings`, which requires the two API keys.
+    connections at all. Ledger and Immich-only commands (``scan``, ``status``,
+    ``report``, ``apply``, ``rejudge``) require only ``IMMICH_URL`` and
+    ``IMMICH_API_KEY``; commands that invoke an AI backend also require
+    ``ANTHROPIC_API_KEY`` or ``OPENAI_BASE_URL``.
     """
 
     settings: Settings
@@ -244,6 +246,33 @@ FinalsEffortOption = Annotated[
         help="Stage-3 thinking effort: none, low, medium, high (FINALS_EFFORT setting).",
     ),
 ]
+LowThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--low-thinking-tokens",
+        callback=_opt_cb("low_thinking_tokens"),
+        help="Thinking token budget for 'low' effort "
+        "(LOW_THINKING_TOKENS setting; default 1024).",
+    ),
+]
+MediumThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--medium-thinking-tokens",
+        callback=_opt_cb("medium_thinking_tokens"),
+        help="Thinking token budget for 'medium' effort "
+        "(MEDIUM_THINKING_TOKENS setting; default 2048).",
+    ),
+]
+HighThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--high-thinking-tokens",
+        callback=_opt_cb("high_thinking_tokens"),
+        help="Thinking token budget for 'high' effort "
+        "(HIGH_THINKING_TOKENS setting; default 4096).",
+    ),
+]
 TriageThinkingTokensOption = Annotated[
     int | None,
     typer.Option(
@@ -316,8 +345,20 @@ def _dotenv_get(key: str) -> str | None:
     return str(val) if val is not None else None
 
 
+def _require_llm_credentials(settings: Settings) -> None:
+    """Exit with status 2 if no AI backend credentials are configured."""
+    try:
+        settings.require_llm_credentials()
+    except ValueError as exc:
+        err_console.print("[bold red]Configuration error.[/bold red]")
+        err_console.print("Missing or invalid: ANTHROPIC_API_KEY (or set OPENAI_BASE_URL)")
+        err_console.print("Set them in the environment or a .env file (see .env.example).")
+        raise typer.Exit(code=2) from exc
+
+
 def _build_llm_client(settings: Settings) -> Any:
     """Build the configured LLM client (OpenAI-compatible or Anthropic)."""
+    _require_llm_credentials(settings)
     if settings.use_openai:
         return OpenAICompatClient(
             base_url=settings.openai_base_url,
@@ -364,6 +405,8 @@ def session(
         A :class:`Session`; everything it owns is closed on the way out.
     """
     settings = load_or_exit(**overrides)
+    if judge:
+        _require_llm_credentials(settings)
     ledger = Ledger(settings.db_path)
     client = ImmichClient(settings.immich_base, settings.immich_api_key) if immich else None
     judge_obj = Judge(_build_llm_client(settings), settings=settings) if judge else None
@@ -480,6 +523,9 @@ def main(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -513,6 +559,9 @@ def check(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -522,6 +571,7 @@ def check(
 ) -> None:
     """Verify both connections and show the active configuration."""
     settings = load_or_exit()
+    _require_llm_credentials(settings)
 
     heading("Settings")
     table = Table(show_header=False, box=None)
@@ -594,6 +644,9 @@ def scan(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -694,6 +747,9 @@ def triage(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -767,6 +823,9 @@ def poll(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -841,6 +900,9 @@ def rank(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -888,6 +950,9 @@ def finals(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -927,6 +992,9 @@ def report(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -1001,6 +1069,9 @@ def apply(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -1175,6 +1246,9 @@ def run(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -1261,6 +1335,9 @@ def watch(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -1351,6 +1428,9 @@ def rejudge(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,
@@ -1425,6 +1505,9 @@ def status(
     triage_effort: TriageEffortOption = None,
     rank_effort: RankEffortOption = None,
     finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
     triage_thinking_tokens: TriageThinkingTokensOption = None,
     rank_thinking_tokens: RankThinkingTokensOption = None,
     finals_thinking_tokens: FinalsThinkingTokensOption = None,

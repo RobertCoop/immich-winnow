@@ -1015,6 +1015,12 @@ def test_apply_and_other_subcommands_accept_all_model_and_thinking_flags(
         "medium",
         "--finals-effort",
         "high",
+        "--low-thinking-tokens",
+        "256",
+        "--medium-thinking-tokens",
+        "1024",
+        "--high-thinking-tokens",
+        "2048",
         "--triage-thinking-tokens",
         "512",
         "--rank-thinking-tokens",
@@ -1059,3 +1065,62 @@ def test_env_file_flag_loads_settings_from_custom_path(
     assert result.exit_code == 0, plain(result.output)
     output = plain(result.stdout)
     assert "local-gemma4:26b (effort=none, thinking=0, max_out=1024)" in output
+
+
+def test_cli_effort_thinking_token_presets_override_settings(
+    runner: CliRunner,
+    settings_env: Path,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(
+            models=SimpleNamespace(list=lambda: SimpleNamespace(data=[]))
+        ),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--low-thinking-tokens",
+            "256",
+            "--medium-thinking-tokens",
+            "768",
+            "--high-thinking-tokens",
+            "1536",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    output = plain(result.stdout)
+    assert "(effort=low, thinking=256, max_out=1024)" in output
+    assert "(effort=medium, thinking=768, max_out=1024)" in output
+    assert "(effort=high, thinking=1536, max_out=1024)" in output
+
+
+def test_non_ai_commands_do_not_require_anthropic_api_key_while_ai_commands_do(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    for args in (
+        ["status"],
+        ["report"],
+        ["apply"],
+        ["scan", "--after", "2024-06-01", "--before", "2024-06-02"],
+        ["rejudge", "-y"],
+    ):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 0, f"{args}: {plain(res.output)}"
+
+    for args in (["check"], ["triage"], ["rank"], ["finals"], ["run", "--no-apply"]):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 2, f"{args}: {plain(res.output)}"
+        assert "ANTHROPIC_API_KEY" in plain(res.stderr)

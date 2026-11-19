@@ -3,8 +3,9 @@
 **AI photo culling for [Immich](https://immich.app) — hide the rejects, crown the keepers.**
 
 Winnow runs your photo library through a three-stage judging funnel powered by
-Claude vision models, then writes the results back to Immich as **reversible**
-ratings, tags, favorites, and stacks. Nothing is ever deleted.
+Claude or any OpenAI-compatible vision model endpoint, then writes the results
+back to Immich as **reversible** ratings, tags, favorites, and stacks. Nothing
+is ever deleted.
 
 > *winnow (v.): to blow the chaff from the grain; to separate the valuable from
 > the worthless.*
@@ -203,15 +204,25 @@ file works too — never commit it).
 |---|---|
 | `IMMICH_URL` | Your Immich base URL, e.g. `http://192.168.1.10:2283` — no trailing `/api`. Inside a compose stack, use the service name: `http://immich-server:2283`. |
 | `IMMICH_API_KEY` | Immich → **Account Settings → API Keys → New API Key**. Select **All** permissions (or at minimum: read/update assets and thumbnails, manage tags, albums, and stacks — Winnow writes ratings, tags, favorites, archives, stacks, and one album). |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) → API Keys. |
+| `ANTHROPIC_API_KEY` or `OPENAI_BASE_URL` | Required only for commands that call an AI backend (`check`, `triage`, `poll`, `rank`, `finals`, `run`, `watch`). Set `ANTHROPIC_API_KEY` from [console.anthropic.com](https://console.anthropic.com/), or set `OPENAI_BASE_URL` (and optional `OPENAI_API_KEY`) to point at an OpenAI-compatible `/v1` endpoint. Local/Immich-only commands (`scan`, `status`, `report`, `apply`, `rejudge`) need only `IMMICH_URL` and `IMMICH_API_KEY`. |
 
 ### Common tuning knobs (defaults shown)
 
 | Variable | Default | What it does |
 |---|---|---|
+| `OPENAI_BASE_URL` | `—` | Base URL for an OpenAI-compatible `/v1` endpoint (e.g. `http://localhost:11434/v1`). Switches Winnow to OpenAI `/chat/completions` in direct mode. |
+| `OPENAI_API_KEY` | `—` | Optional API key for the OpenAI-compatible endpoint. |
 | `TRIAGE_MODEL` | `claude-haiku-4-5` | Stage-1 judge (every photo). |
 | `RANK_MODEL` | `claude-sonnet-5` | Stage-2 judge (best-worst sets). |
 | `FINALS_MODEL` | `claude-opus-5` | Stage-3 judge (head-to-head finals). |
+| `TRIAGE_EFFORT` | `low` | Stage-1 thinking effort (`none`, `low`, `medium`, `high`). |
+| `RANK_EFFORT` | `medium` | Stage-2 thinking effort (`none`, `low`, `medium`, `high`). |
+| `FINALS_EFFORT` | `high` | Stage-3 thinking effort (`none`, `low`, `medium`, `high`). |
+| `LOW_THINKING_TOKENS` | `1024` | Thinking token budget used when effort is `low`. |
+| `MEDIUM_THINKING_TOKENS` | `2048` | Thinking token budget used when effort is `medium`. |
+| `HIGH_THINKING_TOKENS` | `4096` | Thinking token budget used when effort is `high`. |
+| `TRIAGE_THINKING_TOKENS`, `RANK_THINKING_TOKENS`, `FINALS_THINKING_TOKENS` | `—` | Optional explicit per-stage thinking token cap (overrides the effort preset; `0` disables thinking). |
+| `TRIAGE_MAX_TOKENS`, `RANK_MAX_TOKENS`, `FINALS_MAX_TOKENS` | `1024` | Reserved JSON output token budget per stage (total API `max_tokens = thinking_tokens + max_tokens`). |
 | `DB_PATH` | `winnow.db` | The SQLite ledger — Winnow's memory. Keep it; back it up. |
 | `CACHE_DIR` | `.winnow-cache` | Resized thumbnails (~120 KB per photo). |
 | `CANDIDATE_SCORE_MIN` | `8` | Triage score floor for entering stage 2. Lower = rank more photos. |
@@ -280,7 +291,7 @@ captioning flow is `rejudge --missing-captions -y` followed by
 changes to Immich immediately instead of waiting for a reviewed `apply`;
 `watch` applies by default (that's its job — use `--no-apply` to review).
 
-`winnow --version` prints the version; every command takes `--help`.
+`winnow --version` prints the version; every command takes `--help`, `--env-file <path>` (to load settings from a specific `.env` file), and overrides for `--openai-base-url`, `--*-model`, `--*-effort`, `--*-thinking-tokens`, `--*-max-tokens`, and `--low/medium/high-thinking-tokens`. When `OPENAI_BASE_URL` is active, `run` and `watch` automatically use direct calls instead of Anthropic's Batch API.
 
 Start with a few days of photos to calibrate, then widen the date range.
 `scan`/`triage` are incremental — re-running with an overlapping range never
@@ -335,8 +346,11 @@ reject or an unsure "that's a meme" stays in the untouched middle.
 - **Bursts** are detected via timestamp gaps + perceptual hashes (and Immich's
   own duplicate groups), then judged as a single "pick the best of these"
   contest instead of N independent calls.
-- **Batch API support** cuts Anthropic costs 50% for big runs; small runs use
-  direct calls for instant feedback.
+- **Batch API & OpenAI-compatible support.** Anthropic's Batch API cuts
+  cloud costs 50% for big runs while small runs use direct calls for instant
+  feedback; setting `OPENAI_BASE_URL` routes direct calls to any
+  OpenAI-compatible `/v1` vision endpoint with configurable per-stage
+  thinking effort and token budgets.
 
 ## Development
 

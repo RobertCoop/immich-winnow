@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from winnow.config import Settings, load_settings
 
@@ -75,13 +74,28 @@ def test_openai_base_url_works_without_anthropic_api_key(settings_env, monkeypat
     assert s.anthropic_api_key is None
 
 
-def test_missing_both_anthropic_key_and_openai_url_fails(settings_env, monkeypatch):
+def test_missing_both_anthropic_key_and_openai_url_loads_but_fails_llm_check(
+    settings_env, monkeypatch
+):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    with pytest.raises(ValidationError) as exc_info:
-        load_settings()
-    locs = {str(err["loc"][0]) for err in exc_info.value.errors() if err["loc"]}
-    assert "anthropic_api_key" in locs
+    s = load_settings()
+    assert s.anthropic_api_key is None
+    assert s.openai_base_url is None
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        s.require_llm_credentials()
+
+
+def test_effort_thinking_tokens_settings_configure_effort_budgets(settings_env, monkeypatch):
+    monkeypatch.setenv("LOW_THINKING_TOKENS", "500")
+    monkeypatch.setenv("MEDIUM_THINKING_TOKENS", "1500")
+    monkeypatch.setenv("HIGH_THINKING_TOKENS", "3000")
+    s = load_settings(openai_base_url="http://localhost:11434/v1")
+    assert (
+        s.thinking_tokens_for("triage"),
+        s.thinking_tokens_for("rank"),
+        s.thinking_tokens_for("finals"),
+    ) == (500, 1500, 3000)
 
 
 def test_stage_thinking_effort_and_token_defaults(settings_env):

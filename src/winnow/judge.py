@@ -772,8 +772,7 @@ def to_openai_chat_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     base64 image blocks into ``image_url`` data URIs, maps ``output_config``'s
     JSON schema to OpenAI's ``response_format``, and forwards thinking effort
     (``reasoning_effort``) plus ``thinking_budget_tokens`` and
-    ``chat_template_kwargs.enable_thinking`` via ``extra_body`` for
-    LiteLLM / ``llama-swap`` / ``llama-server``.
+    ``chat_template_kwargs.enable_thinking`` via ``extra_body``.
     """
     messages: list[dict[str, Any]] = []
     system = kwargs.get("system")
