@@ -419,6 +419,7 @@ def submit_triage_batch(
     builder = _BatchBuilder(ledger, judge, on_progress)
     budget = limit
     groups = ledger.burst_groups()
+    req_kw: dict[str, Any] = dict(settings.stage_request_kwargs("triage"))
 
     for burst_id in pending_burst_ids(ledger):
         allowed, budget = _spend(budget)
@@ -428,7 +429,7 @@ def submit_triage_batch(
         custom_id = f"{_BURST_PREFIX}{burst_id}"
         try:
             images = [load_thumb_b64(settings.cache_dir, member) for member in members]
-            kwargs = build_burst_request(settings.triage_model, images)
+            kwargs = build_burst_request(settings.triage_model, images, **req_kw)
             request = to_batch_request(custom_id, kwargs)
         except (JudgeError, OSError) as exc:
             emit(on_progress, f"burst {burst_id} not queued: {exc}")
@@ -443,7 +444,7 @@ def submit_triage_batch(
         custom_id = f"{_TRIAGE_PREFIX}{asset_id}"
         try:
             image = load_thumb_b64(settings.cache_dir, asset_id)
-            kwargs = build_triage_request(settings.triage_model, image)
+            kwargs = build_triage_request(settings.triage_model, image, **req_kw)
             request = to_batch_request(custom_id, kwargs)
         except (JudgeError, OSError) as exc:
             emit(on_progress, f"triage {asset_id} not queued: {exc}")

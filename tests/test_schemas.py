@@ -103,6 +103,16 @@ def test_parse_verdict_with_braces_in_strings():
     assert v.reasons == ['odd "brace}" reason']
 
 
+def test_parse_verdict_strips_think_blocks_with_braces():
+    text = (
+        "<think>Let me consider {winner: B} or maybe {winner: A}...</think>\n"
+        + json.dumps({"winner": "A", "note": "sharper eyes"})
+    )
+    v = parse_verdict(text, PairVerdict)
+    assert v.winner == "A"
+    assert v.note == "sharper eyes"
+
+
 def test_parse_verdict_no_json_raises():
     with pytest.raises(ValueError):
         parse_verdict("no json here at all", PairVerdict)
