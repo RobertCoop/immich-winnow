@@ -302,6 +302,33 @@ class ImmichClient:
             chunk = ids[start : start + self.TAG_ASSETS_CHUNK]
             self._request("PUT", f"/tags/{tag_id}/assets", json={"ids": chunk})
 
+    def bulk_tag_assets(self, tag_ids: Sequence[str], asset_ids: Sequence[str]) -> None:
+        """Attach every tag in ``tag_ids`` to every asset in ``asset_ids``.
+
+        Uses ``PUT /api/tags/assets`` (Immich's ``bulkTagAssets``), chunked by
+        asset count (:attr:`TAG_ASSETS_CHUNK`) so a large batch stays inside
+        the client timeout while still attaching all tags for each asset in a
+        single request (emitting one ``SidecarWrite`` per asset instead of one
+        per tag). A no-op when either sequence is empty.
+
+        Servers that predate ``PUT /api/tags/assets`` answer ``404``; those
+        fall back to :meth:`tag_assets` one tag at a time.
+        """
+        tags = list(dict.fromkeys(tag_ids))
+        assets = list(dict.fromkeys(asset_ids))
+        if not tags or not assets:
+            return
+        for start in range(0, len(assets), self.TAG_ASSETS_CHUNK):
+            chunk = assets[start : start + self.TAG_ASSETS_CHUNK]
+            try:
+                self._request("PUT", "/tags/assets", json={"tagIds": tags, "assetIds": chunk})
+            except ImmichError as exc:
+                if exc.status_code == 404:
+                    for tag_id in tags:
+                        self.tag_assets(tag_id, assets[start:])
+                    return
+                raise
+
     def untag_assets(self, tag_id: str, asset_ids: list[str]) -> None:
         """Remove a tag from many assets, chunked. A no-op when empty."""
         ids = list(asset_ids)

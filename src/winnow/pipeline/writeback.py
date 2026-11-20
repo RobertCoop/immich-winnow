@@ -365,17 +365,17 @@ def plan(
 
 
 def _collect(actions: list[Action]) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
-    """Fold per-action ops into one tag->assets map and one asset->fields map."""
-    by_tag: dict[str, list[str]] = {}
+    """Fold per-action ops into one asset->tags map and one asset->fields map."""
+    tags_by_asset: dict[str, list[str]] = {}
     updates: dict[str, dict[str, Any]] = {}
     for action in actions:
         for op in action.api_ops:
             if op["op"] == "tag":
-                by_tag.setdefault(str(op["tag"]), []).append(str(op["asset_id"]))
+                tags_by_asset.setdefault(str(op["asset_id"]), []).append(str(op["tag"]))
             elif op["op"] == "update_asset":
                 fields = {k: v for k, v in op.items() if k not in ("op", "asset_id")}
                 updates.setdefault(str(op["asset_id"]), {}).update(fields)
-    return by_tag, updates
+    return tags_by_asset, updates
 
 
 def apply(
@@ -390,11 +390,12 @@ def apply(
 ) -> ApplyStats:
     """Execute the plan against Immich.
 
-    Tag names are resolved once up front, tagging is batched per tag, and the
-    per-asset updates are merged so an asset is written at most once. Assets
-    whose calls all succeeded are marked applied in the ledger, and a created
-    stack is stamped on its burst, so a repeat run only retries what failed and
-    never stacks the same frames twice.
+    Tag names are resolved once up front, assets sharing a resolved tag set are
+    tagged together via Immich's bulk endpoint so each asset sees a single
+    tagging request, and per-asset updates are merged so an asset is written
+    at most once. Assets whose calls all succeeded are marked applied in the
+    ledger, and a created stack is stamped on its burst, so a repeat run only
+    retries what failed and never stacks the same frames twice.
 
     Args:
         settings: Runtime configuration — supplies ``best_album``,
@@ -434,14 +435,15 @@ def apply(
         emit(on_progress, f"{len(selected)} action(s) planned; nothing written")
         return stats
 
-    by_tag, updates = _collect(selected)
+    tags_by_asset, updates = _collect(selected)
     failed_assets: set[str] = set()
     stacked: list[str] = []
 
     tag_ids: dict[str, str] = {}
-    if by_tag:
+    all_tag_names = sorted({name for names in tags_by_asset.values() for name in names})
+    if all_tag_names:
         try:
-            tag_ids = immich.upsert_tags(sorted(by_tag))
+            tag_ids = immich.upsert_tags(all_tag_names)
         except ImmichError as exc:
             emit(on_progress, f"tag upsert failed: {exc}")
         stats.tags_resolved = len(tag_ids)
@@ -460,19 +462,29 @@ def apply(
                 stats.failed += 1
                 emit(on_progress, f"stack {action.burst_id} failed: {exc}")
 
-    for name, asset_ids in by_tag.items():
-        unique = list(dict.fromkeys(asset_ids))
-        tag_id = tag_ids.get(name)
-        if tag_id is None:
-            failed_assets.update(unique)
-            emit(on_progress, f"tag {name} could not be resolved")
-            continue
+    unresolved_reported: set[str] = set()
+    by_tag_set: dict[tuple[str, ...], list[str]] = {}
+    for asset_id, names in tags_by_asset.items():
+        resolved_names: list[str] = []
+        for name in sorted(set(names)):
+            if name not in tag_ids:
+                failed_assets.add(asset_id)
+                if name not in unresolved_reported:
+                    unresolved_reported.add(name)
+                    emit(on_progress, f"tag {name} could not be resolved")
+            else:
+                resolved_names.append(name)
+        if resolved_names:
+            by_tag_set.setdefault(tuple(resolved_names), []).append(asset_id)
+
+    for resolved_names, asset_ids in by_tag_set.items():
+        resolved_ids = [tag_ids[name] for name in resolved_names]
         try:
-            immich.tag_assets(tag_id, unique)
-            stats.assets_tagged += len(unique)
+            immich.bulk_tag_assets(resolved_ids, asset_ids)
+            stats.assets_tagged += len(resolved_ids) * len(asset_ids)
         except ImmichError as exc:
-            failed_assets.update(unique)
-            emit(on_progress, f"tagging {name} failed: {exc}")
+            failed_assets.update(asset_ids)
+            emit(on_progress, f"tagging {', '.join(resolved_names)} failed: {exc}")
 
     for asset_id, fields in updates.items():
         try:

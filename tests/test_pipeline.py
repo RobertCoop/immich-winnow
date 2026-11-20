@@ -327,8 +327,8 @@ def immich_api(dup_groups: list[dict[str, Any]]) -> Iterator[respx.MockRouter]:
             side_effect=lambda request: httpx.Response(200, json=dup_groups)
         )
         router.put(f"{API}/tags", name="tag_upsert").mock(side_effect=_upsert_tags)
-        router.put(url__regex=re.escape(API) + r"/tags/[^/]+/assets", name="tag_assets").mock(
-            return_value=httpx.Response(200, json={})
+        router.put(f"{API}/tags/assets", name="tag_assets").mock(
+            return_value=httpx.Response(200, json={"count": 1})
         )
         router.put(url__regex=re.escape(API) + r"/assets/[0-9a-f-]+$", name="update_asset").mock(
             side_effect=lambda request: httpx.Response(200, json={"id": "ok"})

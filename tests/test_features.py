@@ -164,7 +164,7 @@ def test_apply_creates_album_and_adds_members(settings, tmp_path):
             200, json=[{"id": "t1", "name": "winnow/best", "value": "winnow/best"}]
         )
     )
-    respx.put(f"{BASE}/api/tags/t1/assets").mock(return_value=Response(200, json=[]))
+    respx.put(f"{BASE}/api/tags/assets").mock(return_value=Response(200, json={"count": 1}))
     update_route = respx.put(url__regex=rf"{BASE}/api/assets/.*").mock(
         return_value=Response(200, json={})
     )
@@ -619,8 +619,8 @@ def test_apply_enrich_writes_and_marks_done(settings_env, monkeypatch, tmp_path)
             ],
         )
     )
-    respx.put(url__regex=rf"{BASE}/api/tags/[^/]+/assets").mock(
-        return_value=Response(200, json=[])
+    tag_route = respx.put(f"{BASE}/api/tags/assets").mock(
+        return_value=Response(200, json={"count": 2})
     )
     update_route = respx.put(f"{BASE}/api/assets/{A}").mock(return_value=Response(200, json={}))
     respx.get(f"{BASE}/api/albums").mock(return_value=Response(200, json=[]))
@@ -633,11 +633,117 @@ def test_apply_enrich_writes_and_marks_done(settings_env, monkeypatch, tmp_path)
         stats = writeback.apply(settings, ledger, immich, {"enrich"}, dry_run=False)
 
     assert stats.enriched == 1
+    assert tag_route.call_count == 1
+    assert json.loads(tag_route.calls[0].request.content) == {
+        "tagIds": ["t0", "t1"],
+        "assetIds": [A],
+    }
     body = json.loads(update_route.calls[0].request.content)
     assert body == {"description": "kids at the beach"}
     # marked done: a second apply plans nothing for enrich
     again = writeback.apply(settings, ledger, immich, {"enrich"}, dry_run=False)
     assert again.selected == 0
+
+
+@respx.mock
+def test_apply_bulk_tags_asset_with_all_tags_in_one_call(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("KEYWORD_TAGS", "true")
+    settings = load_settings()
+    ledger = _seed_enrichable(tmp_path)
+    ledger.set_decision(A, "five_star", {"stars": 5, "rank": 1})
+    respx.put(f"{BASE}/api/tags").mock(
+        side_effect=lambda request: Response(
+            200,
+            json=[
+                {"id": f"t{i}", "name": n.rsplit("/", 1)[-1], "value": n}
+                for i, n in enumerate(json.loads(request.content)["tags"])
+            ],
+        )
+    )
+    tag_route = respx.put(f"{BASE}/api/tags/assets").mock(
+        return_value=Response(200, json={"count": 3})
+    )
+    respx.put(f"{BASE}/api/assets/{A}").mock(return_value=Response(200, json={}))
+
+    with ImmichClient(BASE, "k") as immich:
+        stats = writeback.apply(
+            settings, ledger, immich, {"stars", "enrich"}, dry_run=False, album=""
+        )
+
+    assert stats.assets_tagged == 3
+    assert tag_route.call_count == 1
+    assert json.loads(tag_route.calls[0].request.content) == {
+        "tagIds": ["t0", "t1", "t2"],
+        "assetIds": [A],
+    }
+
+
+@respx.mock
+def test_apply_groups_assets_with_identical_tag_set(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("KEYWORD_TAGS", "true")
+    monkeypatch.setenv("WRITE_CAPTIONS", "false")
+    settings = load_settings()
+    ledger = Ledger(tmp_path / "grouped.db")
+    ledger.upsert_assets([_asset_row(i) for i in (A, B, C)])
+    ledger.record_triage(A, _verdict(keywords=("beach", "kids")), "test-model", None)
+    ledger.record_triage(B, _verdict(keywords=("kids", "beach")), "test-model", None)
+    ledger.record_triage(C, _verdict(keywords=("sunset",)), "test-model", None)
+
+    respx.put(f"{BASE}/api/tags").mock(
+        side_effect=lambda request: Response(
+            200,
+            json=[
+                {"id": f"t-{n}", "name": n.rsplit("/", 1)[-1], "value": n}
+                for n in json.loads(request.content)["tags"]
+            ],
+        )
+    )
+    tag_route = respx.put(f"{BASE}/api/tags/assets").mock(
+        return_value=Response(200, json={"count": 4})
+    )
+
+    with ImmichClient(BASE, "k") as immich:
+        stats = writeback.apply(settings, ledger, immich, {"enrich"}, dry_run=False, album="")
+
+    assert stats.assets_tagged == 5
+    assert tag_route.call_count == 2
+    sent = [json.loads(call.request.content) for call in tag_route.calls]
+    assert {"tagIds": ["t-kw/beach", "t-kw/kids"], "assetIds": [A, B]} in sent
+    assert {"tagIds": ["t-kw/sunset"], "assetIds": [C]} in sent
+
+
+@respx.mock
+def test_apply_handles_partially_unresolved_tags(settings_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("KEYWORD_TAGS", "true")
+    monkeypatch.setenv("WRITE_CAPTIONS", "false")
+    settings = load_settings()
+    ledger = _seed_enrichable(tmp_path)
+
+    only_beach = [{"id": "t0", "name": "beach", "value": "kw/beach"}]
+    respx.put(f"{BASE}/api/tags").mock(return_value=Response(200, json=only_beach))
+    respx.get(f"{BASE}/api/tags").mock(return_value=Response(200, json=only_beach))
+    tag_route = respx.put(f"{BASE}/api/tags/assets").mock(
+        return_value=Response(200, json={"count": 1})
+    )
+
+    messages: list[str] = []
+    with ImmichClient(BASE, "k") as immich:
+        stats = writeback.apply(
+            settings,
+            ledger,
+            immich,
+            {"enrich"},
+            dry_run=False,
+            album="",
+            on_progress=messages.append,
+        )
+
+    assert tag_route.call_count == 1
+    assert json.loads(tag_route.calls[0].request.content) == {"tagIds": ["t0"], "assetIds": [A]}
+    assert "tag kw/kids could not be resolved" in messages
+    assert stats.failed == 1
+    assert stats.enriched == 0
+    assert [row["asset_id"] for row in ledger.unenriched_rows()] == [A]
 
 
 def test_rejudge_resets_enrichment(tmp_path):
