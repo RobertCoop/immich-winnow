@@ -10,6 +10,8 @@ Settings are loaded *inside* each command rather than at import time, so
 
 from __future__ import annotations
 
+import functools
+import inspect
 import os
 import time
 from collections.abc import Iterator
@@ -326,6 +328,54 @@ FinalsMaxTokensOption = Annotated[
 ]
 
 
+def _common_options_template(
+    env_file: EnvFileOption = None,
+    triage_model: TriageModelOption = None,
+    rank_model: RankModelOption = None,
+    finals_model: FinalsModelOption = None,
+    openai_base_url: OpenAIBaseUrlOption = None,
+    triage_effort: TriageEffortOption = None,
+    rank_effort: RankEffortOption = None,
+    finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
+    triage_thinking_tokens: TriageThinkingTokensOption = None,
+    rank_thinking_tokens: RankThinkingTokensOption = None,
+    finals_thinking_tokens: FinalsThinkingTokensOption = None,
+    triage_max_tokens: TriageMaxTokensOption = None,
+    rank_max_tokens: RankMaxTokensOption = None,
+    finals_max_tokens: FinalsMaxTokensOption = None,
+) -> None:
+    """Signature template for CLI options shared across all commands."""
+
+
+_COMMON_SIG = inspect.signature(_common_options_template, eval_str=True)
+_COMMON_PARAMS = list(_COMMON_SIG.parameters.values())
+_COMMON_ANNOTATIONS = {
+    k: v for k, v in _common_options_template.__annotations__.items() if k != "return"
+}
+_COMMON_NAMES = frozenset(_COMMON_SIG.parameters)
+
+
+def _with_common_options(fn: Any) -> Any:
+    """Attach the shared model/endpoint/thinking CLI options to a Typer command."""
+    sig = inspect.signature(fn, eval_str=True)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for name in _COMMON_NAMES:
+            kwargs.pop(name, None)
+        return fn(*args, **kwargs)
+
+    del wrapper.__wrapped__
+    wrapper.__signature__ = sig.replace(  # type: ignore[attr-defined]
+        parameters=[*sig.parameters.values(), *_COMMON_PARAMS]
+    )
+    wrapper.__annotations__ = {**getattr(fn, "__annotations__", {}), **_COMMON_ANNOTATIONS}
+    return wrapper
+
+
 def _merge_overrides(**overrides: Any) -> dict[str, Any]:
     merged = dict(_cli_overrides)
     for key, value in overrides.items():
@@ -505,6 +555,7 @@ def _version_callback(value: bool) -> None:
 
 
 @app.callback()
+@_with_common_options
 def main(
     version: Annotated[
         bool,
@@ -515,23 +566,6 @@ def main(
             help="Show the Winnow version and exit.",
         ),
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Cull an Immich library with AI: triage, rank, finals, write back."""
 
@@ -550,25 +584,8 @@ def _stage_summary(settings: Settings, stage: Any) -> str:
 
 
 @app.command()
-def check(
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
-) -> None:
+@_with_common_options
+def check() -> None:
     """Verify both connections and show the active configuration."""
     settings = load_or_exit()
     _require_llm_credentials(settings)
@@ -627,6 +644,7 @@ def check(
 
 
 @app.command()
+@_with_common_options
 def scan(
     after: Annotated[
         str,
@@ -636,23 +654,6 @@ def scan(
         str,
         typer.Option("--before", envvar="WINNOW_BEFORE", help="End of the window, YYYY-MM-DD."),
     ],
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Pull a date window of Immich photos into the local ledger."""
     with session(immich=True) as ses, progress_reporter("Scanning") as report:
@@ -708,6 +709,7 @@ def _wait_for_batches(
 
 
 @app.command()
+@_with_common_options
 def triage(
     batch: Annotated[
         bool,
@@ -739,23 +741,6 @@ def triage(
             "finishes, and only exit when everything has landed.",
         ),
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Stage 1 — judge every photo, settling bursts with one call each."""
     with session(immich=apply_now, judge=True) as ses:
@@ -793,6 +778,7 @@ def triage(
 
 
 @app.command()
+@_with_common_options
 def poll(
     ingest: Annotated[
         bool, typer.Option(
@@ -815,23 +801,6 @@ def poll(
             help="Stay running and ingest every batch as it finishes, then exit.",
         ),
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Show open Batch API jobs, and optionally ingest the finished ones."""
     with session(immich=apply_now and (ingest or wait), judge=True) as ses:
@@ -882,6 +851,7 @@ def poll(
 
 
 @app.command()
+@_with_common_options
 def rank(
     limit: Annotated[
         int | None,
@@ -892,23 +862,6 @@ def rank(
             "0 = unlimited).",
         ),
     ] = None,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Stage 2 — rank the candidates with best-worst scaling sets."""
     with session(judge=True) as ses:
@@ -923,6 +876,7 @@ def rank(
 
 
 @app.command()
+@_with_common_options
 def finals(
     allow_demotions: Annotated[
         bool,
@@ -942,23 +896,6 @@ def finals(
             "skipping the separate review-then-apply step.",
         ),
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Stage 3 — Swiss head-to-heads over the top pool, then star bands."""
     with session(immich=apply_now, judge=True) as ses:
@@ -978,29 +915,13 @@ def finals(
 
 
 @app.command()
+@_with_common_options
 def report(
     out: Annotated[
         Path, typer.Option(
             "--out", envvar="WINNOW_REPORT_OUT", help="Where to write the HTML contact sheet."
         )
     ] = Path("winnow-report.html"),
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Write a self-contained HTML contact sheet of every decision."""
     with session() as ses:
@@ -1030,6 +951,7 @@ def _print_actions(actions: list[writeback.Action], title: str, verbose: bool) -
 
 
 @app.command()
+@_with_common_options
 def apply(
     buckets: Annotated[
         str, typer.Option(
@@ -1061,23 +983,6 @@ def apply(
             "'' disables it for this run).",
         ),
     ] = None,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Write decisions back to Immich. Dry-run unless --live is given."""
     groups = parse_buckets(buckets)
@@ -1194,6 +1099,7 @@ def _run_cycle(
 
 
 @app.command()
+@_with_common_options
 def run(
     after: Annotated[
         str | None,
@@ -1238,23 +1144,6 @@ def run(
             "(SCORING_LIMIT setting; 0 = unlimited).",
         ),
     ] = None,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """The whole pipeline in one shot: scan → triage → rank → finals → apply → report."""
     started = datetime.now(UTC)
@@ -1278,6 +1167,7 @@ def run(
 
 
 @app.command()
+@_with_common_options
 def watch(
     every: Annotated[
         str, typer.Option(
@@ -1327,23 +1217,6 @@ def watch(
             "--once", envvar="WINNOW_ONCE", help="Run a single cycle and exit (for cron/testing)."
         )
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Stay running: scan new photos, judge, rank and apply on an interval.
 
@@ -1377,6 +1250,7 @@ def watch(
 
 
 @app.command()
+@_with_common_options
 def rejudge(
     stage: Annotated[
         str,
@@ -1420,23 +1294,6 @@ def rejudge(
         bool,
         typer.Option("--yes", "-y", envvar="WINNOW_YES", help="Skip the confirmation prompt."),
     ] = False,
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
 ) -> None:
     """Forget judgments so a stage runs again — for new models, new prompts,
     or captioning a back catalog. Touches only the local ledger, never Immich.
@@ -1496,25 +1353,8 @@ def rejudge(
 
 
 @app.command()
-def status(
-    env_file: EnvFileOption = None,
-    triage_model: TriageModelOption = None,
-    rank_model: RankModelOption = None,
-    finals_model: FinalsModelOption = None,
-    openai_base_url: OpenAIBaseUrlOption = None,
-    triage_effort: TriageEffortOption = None,
-    rank_effort: RankEffortOption = None,
-    finals_effort: FinalsEffortOption = None,
-    low_thinking_tokens: LowThinkingTokensOption = None,
-    medium_thinking_tokens: MediumThinkingTokensOption = None,
-    high_thinking_tokens: HighThinkingTokensOption = None,
-    triage_thinking_tokens: TriageThinkingTokensOption = None,
-    rank_thinking_tokens: RankThinkingTokensOption = None,
-    finals_thinking_tokens: FinalsThinkingTokensOption = None,
-    triage_max_tokens: TriageMaxTokensOption = None,
-    rank_max_tokens: RankMaxTokensOption = None,
-    finals_max_tokens: FinalsMaxTokensOption = None,
-) -> None:
+@_with_common_options
+def status() -> None:
     """Show what the ledger currently holds."""
     with session() as ses:
         summary = ses.ledger.summary()
