@@ -15,13 +15,16 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import anthropic
+import openai
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 from anthropic.types.messages.batch_create_params import Request
 from pydantic import BaseModel
 
+from winnow.config import EFFORT_THINKING_TOKENS
 from winnow.schemas import (
     BurstVerdict,
     BWSVerdict,
@@ -43,6 +46,7 @@ __all__ = [
     "Judge",
     "JudgeError",
     "JudgeResult",
+    "OpenAICompatClient",
     "batch_status",
     "build_burst_request",
     "build_bws_request",
@@ -53,6 +57,7 @@ __all__ = [
     "parse_message",
     "submit_batch",
     "to_batch_request",
+    "to_openai_chat_kwargs",
 ]
 
 #: ``max_tokens`` for the cheap stage-1 calls (Haiku triage and burst picks).
@@ -87,14 +92,17 @@ class JudgeError(RuntimeError):
 
 
 #: Errors a per-item pipeline handler should count and skip: one bad photo
-#: must never abort a whole stage. ``anthropic.APIError`` is **not** an
-#: ``OSError``, so the SDK classes have to be listed explicitly.
+#: must never abort a whole stage. ``anthropic.APIError`` and
+#: ``openai.APIError`` are **not** ``OSError``s, so the SDK classes have to
+#: be listed explicitly.
 ITEM_ERRORS: tuple[type[BaseException], ...] = (
     JudgeError,
     OSError,
     ValueError,
     anthropic.APIStatusError,
     anthropic.APIConnectionError,
+    openai.APIStatusError,
+    openai.APIConnectionError,
 )
 
 #: Errors that are never per-item: retrying the next photo cannot help, so
@@ -102,6 +110,8 @@ ITEM_ERRORS: tuple[type[BaseException], ...] = (
 FATAL_ERRORS: tuple[type[BaseException], ...] = (
     anthropic.AuthenticationError,
     anthropic.PermissionDeniedError,
+    openai.AuthenticationError,
+    openai.PermissionDeniedError,
 )
 
 
@@ -337,10 +347,16 @@ def _labeled_images(
     return content
 
 
-def _output_config(model_cls: type[BaseModel], effort: str | None) -> dict[str, Any]:
+def _output_config(
+    model_cls: type[BaseModel],
+    effort: str | None,
+    thinking_tokens: int | None = None,
+) -> dict[str, Any]:
     config: dict[str, Any] = {"format": {"type": "json_schema", "schema": output_schema(model_cls)}}
     if effort is not None:
         config["effort"] = effort
+    if thinking_tokens is not None:
+        config["thinking_budget_tokens"] = thinking_tokens
     return config
 
 
@@ -352,38 +368,54 @@ def _request(
     content: list[dict[str, Any]],
     model_cls: type[BaseModel],
     effort: str | None = None,
+    thinking_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Assemble ``messages.create`` kwargs.
 
     Deliberately omits ``temperature``, ``top_p``, ``top_k`` and ``thinking``:
     the stage-2/3 models reject sampling parameters outright, and their default
     adaptive thinking is what we want. That thinking is billed against
-    ``max_tokens`` alongside the answer text, so stage 2/3 also pass a low
-    ``effort`` — these are one-line verdicts, not deep reasoning tasks — and a
-    budget with headroom. Haiku gets neither: it does not think by default and
-    rejects ``effort`` outright.
+    ``max_tokens`` alongside the answer text, so stage 2/3 also pass an
+    ``effort`` and a budget with headroom. Haiku gets neither: it does not
+    think by default and rejects ``effort`` outright.
     """
     return {
         "model": model,
         "max_tokens": max_tokens,
         "system": system,
         "messages": [{"role": "user", "content": content}],
-        "output_config": _output_config(model_cls, effort),
+        "output_config": _output_config(model_cls, effort, thinking_tokens),
     }
 
 
-def build_triage_request(model: str, image_b64: str) -> dict[str, Any]:
+def build_triage_request(
+    model: str,
+    image_b64: str,
+    *,
+    max_tokens: int = TRIAGE_MAX_TOKENS,
+    effort: str | None = None,
+    thinking_tokens: int | None = None,
+) -> dict[str, Any]:
     """Kwargs for a single-photo stage-1 triage call."""
     return _request(
         model=model,
-        max_tokens=TRIAGE_MAX_TOKENS,
+        max_tokens=max_tokens,
         system=TRIAGE_SYSTEM,
         content=[_image_block(image_b64), {"type": "text", "text": _TRIAGE_INSTRUCTION}],
         model_cls=TriageVerdict,
+        effort=effort,
+        thinking_tokens=thinking_tokens,
     )
 
 
-def build_burst_request(model: str, images_b64: list[str]) -> dict[str, Any]:
+def build_burst_request(
+    model: str,
+    images_b64: list[str],
+    *,
+    max_tokens: int = TRIAGE_MAX_TOKENS,
+    effort: str | None = None,
+    thinking_tokens: int | None = None,
+) -> dict[str, Any]:
     """Kwargs for a pick-the-best call over a burst of near-identical frames.
 
     Raises:
@@ -402,14 +434,23 @@ def build_burst_request(model: str, images_b64: list[str]) -> dict[str, Any]:
     content.append({"type": "text", "text": _burst_instruction(len(images_b64))})
     return _request(
         model=model,
-        max_tokens=TRIAGE_MAX_TOKENS,
+        max_tokens=max_tokens,
         system=BURST_SYSTEM,
         content=content,
         model_cls=BurstVerdict,
+        effort=effort,
+        thinking_tokens=thinking_tokens,
     )
 
 
-def build_bws_request(model: str, images_b64: list[str]) -> dict[str, Any]:
+def build_bws_request(
+    model: str,
+    images_b64: list[str],
+    *,
+    max_tokens: int = RANK_MAX_TOKENS,
+    effort: str | None = RANK_EFFORT,
+    thinking_tokens: int | None = None,
+) -> dict[str, Any]:
     """Kwargs for a best-worst-scaling call over a set of unrelated photos."""
     if len(images_b64) < 2:
         raise JudgeError(f"a BWS set needs at least 2 photos, got {len(images_b64)}")
@@ -418,25 +459,35 @@ def build_bws_request(model: str, images_b64: list[str]) -> dict[str, Any]:
     content.append({"type": "text", "text": _bws_instruction(len(images_b64))})
     return _request(
         model=model,
-        max_tokens=RANK_MAX_TOKENS,
+        max_tokens=max_tokens,
         system=BWS_SYSTEM,
         content=content,
         model_cls=BWSVerdict,
-        effort=RANK_EFFORT,
+        effort=effort,
+        thinking_tokens=thinking_tokens,
     )
 
 
-def build_pair_request(model: str, image_a_b64: str, image_b_b64: str) -> dict[str, Any]:
+def build_pair_request(
+    model: str,
+    image_a_b64: str,
+    image_b_b64: str,
+    *,
+    max_tokens: int = RANK_MAX_TOKENS,
+    effort: str | None = RANK_EFFORT,
+    thinking_tokens: int | None = None,
+) -> dict[str, Any]:
     """Kwargs for a finals head-to-head between photo A and photo B."""
     content = _labeled_images([image_a_b64, image_b_b64], ["A", "B"])
     content.append({"type": "text", "text": _PAIR_INSTRUCTION})
     return _request(
         model=model,
-        max_tokens=RANK_MAX_TOKENS,
+        max_tokens=max_tokens,
         system=PAIR_SYSTEM,
         content=content,
         model_cls=PairVerdict,
-        effort=RANK_EFFORT,
+        effort=effort,
+        thinking_tokens=thinking_tokens,
     )
 
 
@@ -516,18 +567,54 @@ def _check_indices(indices: Sequence[int], count: int, what: str) -> None:
 
 
 class Judge:
-    """Runs judging calls against a Claude client, retrying unparseable replies."""
+    """Runs judging calls against an LLM client, retrying unparseable replies."""
 
-    def __init__(self, client: Any, *, max_parse_retries: int = 1) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        max_parse_retries: int = 1,
+        settings: Any | None = None,
+    ) -> None:
         """Wrap ``client`` (anything with ``messages.create``).
 
         Args:
-            client: An ``anthropic.Anthropic`` instance or compatible stub.
+            client: An ``anthropic.Anthropic`` / :class:`OpenAICompatClient`
+                instance or compatible stub.
             max_parse_retries: Extra attempts after a parse or validation
                 failure. The default of 1 means two calls at most.
+            settings: Optional :class:`~winnow.config.Settings` supplying
+                per-stage effort, thinking budget, and max token defaults.
         """
         self.client = client
         self.max_parse_retries = max_parse_retries
+        self.settings = settings
+
+    def _stage_kwargs(
+        self,
+        stage: str,
+        *,
+        default_max_tokens: int,
+        default_effort: str | None,
+        max_tokens: int | None,
+        effort: str | None,
+        thinking_tokens: int | None,
+    ) -> dict[str, Any]:
+        if self.settings is not None and hasattr(self.settings, "stage_request_kwargs"):
+            base = dict(self.settings.stage_request_kwargs(stage))
+        else:
+            base = {
+                "max_tokens": default_max_tokens,
+                "effort": default_effort,
+                "thinking_tokens": None,
+            }
+        if max_tokens is not None:
+            base["max_tokens"] = max_tokens
+        if effort is not None:
+            base["effort"] = effort
+        if thinking_tokens is not None:
+            base["thinking_tokens"] = thinking_tokens
+        return base
 
     def _run(
         self,
@@ -571,11 +658,35 @@ class Judge:
             f"{last_error}"
         ) from last_error
 
-    def triage(self, model: str, image_b64: str) -> JudgeResult:
+    def triage(
+        self,
+        model: str,
+        image_b64: str,
+        *,
+        max_tokens: int | None = None,
+        effort: str | None = None,
+        thinking_tokens: int | None = None,
+    ) -> JudgeResult:
         """Judge a single photo; ``result.verdict`` is a ``TriageVerdict``."""
-        return self._run(build_triage_request(model, image_b64), TriageVerdict)
+        kw = self._stage_kwargs(
+            "triage",
+            default_max_tokens=TRIAGE_MAX_TOKENS,
+            default_effort=None,
+            max_tokens=max_tokens,
+            effort=effort,
+            thinking_tokens=thinking_tokens,
+        )
+        return self._run(build_triage_request(model, image_b64, **kw), TriageVerdict)
 
-    def burst(self, model: str, images_b64: list[str]) -> JudgeResult:
+    def burst(
+        self,
+        model: str,
+        images_b64: list[str],
+        *,
+        max_tokens: int | None = None,
+        effort: str | None = None,
+        thinking_tokens: int | None = None,
+    ) -> JudgeResult:
         """Pick the best frame of a burst; ``result.verdict`` is a ``BurstVerdict``."""
         count = len(images_b64)
 
@@ -587,9 +698,25 @@ class Judge:
                     f"best_index {verdict.best_index} also appears in reject_indices"
                 )
 
-        return self._run(build_burst_request(model, images_b64), BurstVerdict, validate)
+        kw = self._stage_kwargs(
+            "triage",
+            default_max_tokens=TRIAGE_MAX_TOKENS,
+            default_effort=None,
+            max_tokens=max_tokens,
+            effort=effort,
+            thinking_tokens=thinking_tokens,
+        )
+        return self._run(build_burst_request(model, images_b64, **kw), BurstVerdict, validate)
 
-    def bws(self, model: str, images_b64: list[str]) -> JudgeResult:
+    def bws(
+        self,
+        model: str,
+        images_b64: list[str],
+        *,
+        max_tokens: int | None = None,
+        effort: str | None = None,
+        thinking_tokens: int | None = None,
+    ) -> JudgeResult:
         """Name best and worst of a set; ``result.verdict`` is a ``BWSVerdict``."""
         count = len(images_b64)
 
@@ -601,11 +728,154 @@ class Judge:
                     f"best_index and worst_index are both {verdict.best_index}"
                 )
 
-        return self._run(build_bws_request(model, images_b64), BWSVerdict, validate)
+        kw = self._stage_kwargs(
+            "rank",
+            default_max_tokens=RANK_MAX_TOKENS,
+            default_effort=RANK_EFFORT,
+            max_tokens=max_tokens,
+            effort=effort,
+            thinking_tokens=thinking_tokens,
+        )
+        return self._run(build_bws_request(model, images_b64, **kw), BWSVerdict, validate)
 
-    def pair(self, model: str, a_b64: str, b_b64: str) -> JudgeResult:
+    def pair(
+        self,
+        model: str,
+        a_b64: str,
+        b_b64: str,
+        *,
+        max_tokens: int | None = None,
+        effort: str | None = None,
+        thinking_tokens: int | None = None,
+    ) -> JudgeResult:
         """Judge A vs B; ``result.verdict`` is a ``PairVerdict``."""
-        return self._run(build_pair_request(model, a_b64, b_b64), PairVerdict)
+        kw = self._stage_kwargs(
+            "finals",
+            default_max_tokens=RANK_MAX_TOKENS,
+            default_effort=RANK_EFFORT,
+            max_tokens=max_tokens,
+            effort=effort,
+            thinking_tokens=thinking_tokens,
+        )
+        return self._run(build_pair_request(model, a_b64, b_b64, **kw), PairVerdict)
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-compatible client adapter
+# --------------------------------------------------------------------------- #
+
+
+def to_openai_chat_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Translate Winnow ``messages.create`` kwargs to OpenAI ``chat.completions.create`` kwargs.
+
+    Converts the top-level ``system`` prompt into a ``system`` message, turns
+    base64 image blocks into ``image_url`` data URIs, maps ``output_config``'s
+    JSON schema to OpenAI's ``response_format``, and forwards thinking effort
+    (``reasoning_effort``) plus ``thinking_budget_tokens`` and
+    ``chat_template_kwargs.enable_thinking`` via ``extra_body``.
+    """
+    messages: list[dict[str, Any]] = []
+    system = kwargs.get("system")
+    if system:
+        messages.append({"role": "system", "content": system})
+
+    for msg in kwargs.get("messages") or []:
+        blocks: list[dict[str, Any]] = []
+        for block in msg.get("content") or []:
+            btype = block.get("type")
+            if btype == "text":
+                blocks.append({"type": "text", "text": block.get("text", "")})
+            elif btype == "image":
+                src = block.get("source") or {}
+                media_type = src.get("media_type", _JPEG_MEDIA_TYPE)
+                data = src.get("data", "")
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    }
+                )
+        messages.append({"role": msg.get("role", "user"), "content": blocks})
+
+    out: dict[str, Any] = {
+        "model": kwargs["model"],
+        "max_tokens": kwargs["max_tokens"],
+        "messages": messages,
+    }
+    output_config = kwargs.get("output_config") or {}
+    schema = (output_config.get("format") or {}).get("schema")
+    if schema is not None:
+        out["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "verdict",
+                "strict": True,
+                "schema": schema,
+            },
+        }
+    effort = output_config.get("effort")
+    budget = output_config.get("thinking_budget_tokens")
+    if budget is None and effort in EFFORT_THINKING_TOKENS:
+        budget = EFFORT_THINKING_TOKENS[effort]
+    if budget == 0:
+        effort = "none"
+    if effort is not None:
+        out["reasoning_effort"] = effort
+    if budget is not None:
+        out["extra_body"] = {
+            "thinking_budget_tokens": int(budget),
+            "chat_template_kwargs": {"enable_thinking": int(budget) > 0},
+        }
+    return out
+
+
+class OpenAICompatClient:
+    """Adapts an :class:`openai.OpenAI` client to the surface :class:`Judge` expects."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        openai_client: Any | None = None,
+    ) -> None:
+        self._client = (
+            openai_client
+            if openai_client is not None
+            else openai.OpenAI(base_url=base_url, api_key=api_key or "no-key")
+        )
+        self.messages = SimpleNamespace(create=self._create_message)
+        self.models = self._client.models
+
+    def _create_message(self, **kwargs: Any) -> SimpleNamespace:
+        chat_kwargs = to_openai_chat_kwargs(kwargs)
+        completion = self._client.chat.completions.create(**chat_kwargs)
+        choices = getattr(completion, "choices", None) or []
+        choice = choices[0] if choices else None
+        msg = getattr(choice, "message", None)
+        text = getattr(msg, "content", None)
+        refusal = getattr(msg, "refusal", None)
+        finish_reason = getattr(choice, "finish_reason", None)
+
+        if finish_reason in ("content_filter", "refusal") or refusal:
+            stop_reason: str | None = "refusal"
+        elif finish_reason == "length":
+            stop_reason = "max_tokens"
+        elif finish_reason == "stop":
+            stop_reason = "end_turn"
+        else:
+            stop_reason = finish_reason
+
+        content = [SimpleNamespace(type="text", text=text)] if text is not None else []
+        usage = getattr(completion, "usage", None)
+        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        return SimpleNamespace(
+            content=content,
+            stop_reason=stop_reason,
+            usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+            model=getattr(completion, "model", None) or kwargs.get("model"),
+        )
 
 
 # --------------------------------------------------------------------------- #

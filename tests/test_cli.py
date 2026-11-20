@@ -779,3 +779,348 @@ def test_progress_reporter_persists_failure_lines() -> None:
     output = ANSI.sub("", capture.get())
     assert "! update a1 failed: HTTP 500" in output
     assert "! tag winnow/reject could not be resolved" in output
+
+
+# ----------------------------------------------------------------------
+# OpenAI-compatible mode & model CLI overrides
+# ----------------------------------------------------------------------
+
+
+def test_cli_model_and_openai_flags_override_settings_in_check(
+    runner: CliRunner,
+    settings_env: Path,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_oai: dict[str, Any] = {}
+
+    def fake_oai(*, base_url: str | None = None, api_key: str | None = None) -> Any:
+        captured_oai["base_url"] = base_url
+        captured_oai["api_key"] = api_key
+        return SimpleNamespace(
+            models=SimpleNamespace(
+                list=lambda: SimpleNamespace(
+                    data=[
+                        SimpleNamespace(id="extract-light"),
+                        SimpleNamespace(id="local-gemma4:26b"),
+                        SimpleNamespace(id="local-qwen3.8-27b"),
+                    ]
+                )
+            )
+        )
+
+    monkeypatch.setattr(cli, "OpenAICompatClient", fake_oai)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--triage-model",
+            "extract-light",
+            "--rank-model",
+            "local-gemma4:26b",
+            "--finals-model",
+            "local-qwen3.8-27b",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    output = plain(result.stdout)
+    assert "http://localhost:11434/v1" in output
+    assert "extract-light" in output
+    assert "local-gemma4:26b" in output
+    assert "local-qwen3.8-27b" in output
+    assert "OpenAI endpoint reachable (3 models visible)" in output
+    assert captured_oai["base_url"] == "http://localhost:11434/v1"
+
+
+def test_top_level_cli_flags_work_before_subcommand(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_rank(settings: Any, ledger: Any, judge: Any, **kwargs: Any) -> RankStats:
+        captured["rank_model"] = settings.rank_model
+        captured["triage_model"] = settings.triage_model
+        captured["finals_model"] = settings.finals_model
+        return RankStats(candidates=2, sets_judged=1, pairs=2, input_tokens=10, output_tokens=5)
+
+    monkeypatch.setattr(cli, "run_rank", fake_rank)
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(messages=SimpleNamespace(), models=SimpleNamespace()),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--triage-model",
+            "extract-light",
+            "--rank-model",
+            "local-gemma4:26b",
+            "--finals-model",
+            "local-qwen3.8-27b",
+            "rank",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    assert captured == {
+        "triage_model": "extract-light",
+        "rank_model": "local-gemma4:26b",
+        "finals_model": "local-qwen3.8-27b",
+    }
+
+
+def test_triage_batch_and_poll_fail_in_openai_mode(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(messages=SimpleNamespace(), models=SimpleNamespace()),
+    )
+
+    triage_res = runner.invoke(app, ["triage", "--batch"])
+    assert triage_res.exit_code == 2
+    assert "Batch API is only supported with native Anthropic" in plain(triage_res.stderr)
+
+    poll_res = runner.invoke(app, ["poll"])
+    assert poll_res.exit_code == 2
+    assert "Batch API is only supported with native Anthropic" in plain(poll_res.stderr)
+
+
+def test_run_automatically_uses_direct_mode_when_openai_base_url_is_set(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(messages=SimpleNamespace(), models=SimpleNamespace()),
+    )
+    monkeypatch.setattr(cli, "run_scan", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli,
+        "run_triage_direct",
+        lambda s, *a, **k: (calls.append(("triage", s.triage_model)), SimpleNamespace())[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_rank",
+        lambda s, *a, **k: (calls.append(("rank", s.rank_model)), RankStats())[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_finals",
+        lambda s, *a, **k: (calls.append(("finals", s.finals_model)), FinalsStats())[1],
+    )
+    monkeypatch.setattr(
+        cli, "write_html_report", lambda ledger, cache, out: Path("winnow-report.html")
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--no-apply",
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--triage-model",
+            "extract-light",
+            "--rank-model",
+            "local-gemma4:26b",
+            "--finals-model",
+            "local-qwen3.8-27b",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    assert calls == [
+        ("triage", "extract-light"),
+        ("rank", "local-gemma4:26b"),
+        ("finals", "local-qwen3.8-27b"),
+    ]
+
+
+def test_cli_thinking_effort_and_token_flags_override_settings(
+    runner: CliRunner,
+    settings_env: Path,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(
+            models=SimpleNamespace(list=lambda: SimpleNamespace(data=[]))
+        ),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--triage-model",
+            "local-gemma4:26b",
+            "--triage-effort",
+            "none",
+            "--rank-model",
+            "local-gemma4:26b",
+            "--rank-thinking-tokens",
+            "512",
+            "--rank-max-tokens",
+            "2048",
+            "--finals-model",
+            "local-qwen3.8-27b",
+            "--finals-effort",
+            "high",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    output = plain(result.stdout)
+    assert "local-gemma4:26b (effort=none, thinking=0, max_out=1024)" in output
+    assert "local-gemma4:26b (effort=medium, thinking=512, max_out=2048)" in output
+    assert "local-qwen3.8-27b (effort=high, thinking=4096, max_out=1024)" in output
+
+
+def test_apply_and_other_subcommands_accept_all_model_and_thinking_flags(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    immich_api: respx.MockRouter,
+) -> None:
+    common_flags = [
+        "--openai-base-url",
+        "http://localhost:11434/v1",
+        "--triage-model",
+        "local-gemma4:26b",
+        "--rank-model",
+        "local-gemma4:26b",
+        "--finals-model",
+        "local-gemma4:26b",
+        "--triage-effort",
+        "low",
+        "--rank-effort",
+        "medium",
+        "--finals-effort",
+        "high",
+        "--low-thinking-tokens",
+        "256",
+        "--medium-thinking-tokens",
+        "1024",
+        "--high-thinking-tokens",
+        "2048",
+        "--triage-thinking-tokens",
+        "512",
+        "--rank-thinking-tokens",
+        "1024",
+        "--finals-thinking-tokens",
+        "2048",
+        "--triage-max-tokens",
+        "1024",
+        "--rank-max-tokens",
+        "1024",
+        "--finals-max-tokens",
+        "1024",
+    ]
+    for subcmd in (["apply"], ["status"], ["report"]):
+        result = runner.invoke(app, [*subcmd, *common_flags])
+        assert result.exit_code == 0, f"{subcmd}: {plain(result.output)}"
+
+
+def test_env_file_flag_loads_settings_from_custom_path(
+    runner: CliRunner,
+    bare_env: Path,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(
+            models=SimpleNamespace(list=lambda: SimpleNamespace(data=[]))
+        ),
+    )
+    custom_env = bare_env / "my-winnow.env"
+    custom_env.write_text(
+        "IMMICH_URL=http://immich.test:2283\n"
+        "IMMICH_API_KEY=from-file\n"
+        "OPENAI_BASE_URL=http://localhost:11434/v1\n"
+        "TRIAGE_MODEL=local-gemma4:26b\n"
+        "TRIAGE_EFFORT=none\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["check", "--env-file", str(custom_env)])
+    assert result.exit_code == 0, plain(result.output)
+    output = plain(result.stdout)
+    assert "local-gemma4:26b (effort=none, thinking=0, max_out=1024)" in output
+
+
+def test_cli_effort_thinking_token_presets_override_settings(
+    runner: CliRunner,
+    settings_env: Path,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatClient",
+        lambda **kw: SimpleNamespace(
+            models=SimpleNamespace(list=lambda: SimpleNamespace(data=[]))
+        ),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--openai-base-url",
+            "http://localhost:11434/v1",
+            "--low-thinking-tokens",
+            "256",
+            "--medium-thinking-tokens",
+            "768",
+            "--high-thinking-tokens",
+            "1536",
+        ],
+    )
+    assert result.exit_code == 0, plain(result.output)
+    output = plain(result.stdout)
+    assert "(effort=low, thinking=256, max_out=1024)" in output
+    assert "(effort=medium, thinking=768, max_out=1024)" in output
+    assert "(effort=high, thinking=1536, max_out=1024)" in output
+
+
+def test_non_ai_commands_do_not_require_anthropic_api_key_while_ai_commands_do(
+    runner: CliRunner,
+    seeded: SimpleNamespace,
+    immich_api: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    for args in (
+        ["status"],
+        ["report"],
+        ["apply"],
+        ["scan", "--after", "2024-06-01", "--before", "2024-06-02"],
+        ["rejudge", "-y"],
+    ):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 0, f"{args}: {plain(res.output)}"
+
+    for args in (["check"], ["triage"], ["rank"], ["finals"], ["run", "--no-apply"]):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 2, f"{args}: {plain(res.output)}"
+        assert "ANTHROPIC_API_KEY" in plain(res.stderr)

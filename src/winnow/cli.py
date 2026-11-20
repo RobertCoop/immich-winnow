@@ -10,6 +10,9 @@ Settings are loaded *inside* each command rather than at import time, so
 
 from __future__ import annotations
 
+import functools
+import inspect
+import os
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +23,7 @@ from typing import Annotated, Any
 
 import typer
 from anthropic import Anthropic
+from dotenv import dotenv_values
 from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
@@ -28,7 +32,7 @@ from rich.table import Table
 from winnow import __version__
 from winnow.config import Settings, load_settings
 from winnow.immich import ImmichClient, ImmichError
-from winnow.judge import Judge, batch_status
+from winnow.judge import Judge, OpenAICompatClient, batch_status
 from winnow.ledger import Ledger
 from winnow.pipeline import writeback
 from winnow.pipeline.finals import run_finals
@@ -140,8 +144,10 @@ class Session:
 
     ``immich`` and ``judge`` are only created for the commands that ask for
     them, so ledger-only commands such as ``status`` and ``report`` open no
-    connections at all. They still need a valid configuration: every command
-    loads :class:`~winnow.config.Settings`, which requires the two API keys.
+    connections at all. Ledger and Immich-only commands (``scan``, ``status``,
+    ``report``, ``apply``, ``rejudge``) require only ``IMMICH_URL`` and
+    ``IMMICH_API_KEY``; commands that invoke an AI backend also require
+    ``ANTHROPIC_API_KEY`` or ``OPENAI_BASE_URL``.
     """
 
     settings: Settings
@@ -164,10 +170,267 @@ class Session:
         return self.judge
 
 
-def load_or_exit() -> Settings:
+#: CLI-level setting overrides populated by option callbacks.
+_cli_overrides: dict[str, Any] = {}
+
+
+def _opt_cb(key: str) -> Any:
+    def _cb(value: Any) -> Any:
+        if value is not None:
+            _cli_overrides[key] = value
+        return value
+
+    return _cb
+
+
+EnvFileOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--env-file",
+        callback=_opt_cb("_env_file"),
+        help="Path to a .env file to load settings from (default: ./.env).",
+    ),
+]
+TriageModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--triage-model",
+        callback=_opt_cb("triage_model"),
+        help="Override the stage-1 triage model (TRIAGE_MODEL setting).",
+    ),
+]
+RankModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--rank-model",
+        callback=_opt_cb("rank_model"),
+        help="Override the stage-2 ranking model (RANK_MODEL setting).",
+    ),
+]
+FinalsModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--finals-model",
+        callback=_opt_cb("finals_model"),
+        help="Override the stage-3 finals model (FINALS_MODEL setting).",
+    ),
+]
+OpenAIBaseUrlOption = Annotated[
+    str | None,
+    typer.Option(
+        "--openai-base-url",
+        callback=_opt_cb("openai_base_url"),
+        help="OpenAI-compatible API base URL, e.g. http://localhost:11434/v1 "
+        "(OPENAI_BASE_URL setting).",
+    ),
+]
+TriageEffortOption = Annotated[
+    str | None,
+    typer.Option(
+        "--triage-effort",
+        callback=_opt_cb("triage_effort"),
+        help="Stage-1 thinking effort: none, low, medium, high (TRIAGE_EFFORT setting).",
+    ),
+]
+RankEffortOption = Annotated[
+    str | None,
+    typer.Option(
+        "--rank-effort",
+        callback=_opt_cb("rank_effort"),
+        help="Stage-2 thinking effort: none, low, medium, high (RANK_EFFORT setting).",
+    ),
+]
+FinalsEffortOption = Annotated[
+    str | None,
+    typer.Option(
+        "--finals-effort",
+        callback=_opt_cb("finals_effort"),
+        help="Stage-3 thinking effort: none, low, medium, high (FINALS_EFFORT setting).",
+    ),
+]
+LowThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--low-thinking-tokens",
+        callback=_opt_cb("low_thinking_tokens"),
+        help="Thinking token budget for 'low' effort "
+        "(LOW_THINKING_TOKENS setting; default 1024).",
+    ),
+]
+MediumThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--medium-thinking-tokens",
+        callback=_opt_cb("medium_thinking_tokens"),
+        help="Thinking token budget for 'medium' effort "
+        "(MEDIUM_THINKING_TOKENS setting; default 2048).",
+    ),
+]
+HighThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--high-thinking-tokens",
+        callback=_opt_cb("high_thinking_tokens"),
+        help="Thinking token budget for 'high' effort "
+        "(HIGH_THINKING_TOKENS setting; default 4096).",
+    ),
+]
+TriageThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--triage-thinking-tokens",
+        callback=_opt_cb("triage_thinking_tokens"),
+        help="Explicit stage-1 thinking token cap; 0 disables thinking "
+        "(TRIAGE_THINKING_TOKENS setting).",
+    ),
+]
+RankThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--rank-thinking-tokens",
+        callback=_opt_cb("rank_thinking_tokens"),
+        help="Explicit stage-2 thinking token cap; 0 disables thinking "
+        "(RANK_THINKING_TOKENS setting).",
+    ),
+]
+FinalsThinkingTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--finals-thinking-tokens",
+        callback=_opt_cb("finals_thinking_tokens"),
+        help="Explicit stage-3 thinking token cap; 0 disables thinking "
+        "(FINALS_THINKING_TOKENS setting).",
+    ),
+]
+TriageMaxTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--triage-max-tokens",
+        callback=_opt_cb("triage_max_tokens"),
+        help="Reserved JSON output token budget for stage 1 (TRIAGE_MAX_TOKENS setting).",
+    ),
+]
+RankMaxTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--rank-max-tokens",
+        callback=_opt_cb("rank_max_tokens"),
+        help="Reserved JSON output token budget for stage 2 (RANK_MAX_TOKENS setting).",
+    ),
+]
+FinalsMaxTokensOption = Annotated[
+    int | None,
+    typer.Option(
+        "--finals-max-tokens",
+        callback=_opt_cb("finals_max_tokens"),
+        help="Reserved JSON output token budget for stage 3 (FINALS_MAX_TOKENS setting).",
+    ),
+]
+
+
+def _common_options_template(
+    env_file: EnvFileOption = None,
+    triage_model: TriageModelOption = None,
+    rank_model: RankModelOption = None,
+    finals_model: FinalsModelOption = None,
+    openai_base_url: OpenAIBaseUrlOption = None,
+    triage_effort: TriageEffortOption = None,
+    rank_effort: RankEffortOption = None,
+    finals_effort: FinalsEffortOption = None,
+    low_thinking_tokens: LowThinkingTokensOption = None,
+    medium_thinking_tokens: MediumThinkingTokensOption = None,
+    high_thinking_tokens: HighThinkingTokensOption = None,
+    triage_thinking_tokens: TriageThinkingTokensOption = None,
+    rank_thinking_tokens: RankThinkingTokensOption = None,
+    finals_thinking_tokens: FinalsThinkingTokensOption = None,
+    triage_max_tokens: TriageMaxTokensOption = None,
+    rank_max_tokens: RankMaxTokensOption = None,
+    finals_max_tokens: FinalsMaxTokensOption = None,
+) -> None:
+    """Signature template for CLI options shared across all commands."""
+
+
+_COMMON_SIG = inspect.signature(_common_options_template, eval_str=True)
+_COMMON_PARAMS = list(_COMMON_SIG.parameters.values())
+_COMMON_ANNOTATIONS = {
+    k: v for k, v in _common_options_template.__annotations__.items() if k != "return"
+}
+_COMMON_NAMES = frozenset(_COMMON_SIG.parameters)
+
+
+def _with_common_options(fn: Any) -> Any:
+    """Attach the shared model/endpoint/thinking CLI options to a Typer command."""
+    sig = inspect.signature(fn, eval_str=True)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for name in _COMMON_NAMES:
+            kwargs.pop(name, None)
+        return fn(*args, **kwargs)
+
+    del wrapper.__wrapped__
+    wrapper.__signature__ = sig.replace(  # type: ignore[attr-defined]
+        parameters=[*sig.parameters.values(), *_COMMON_PARAMS]
+    )
+    wrapper.__annotations__ = {**getattr(fn, "__annotations__", {}), **_COMMON_ANNOTATIONS}
+    return wrapper
+
+
+def _merge_overrides(**overrides: Any) -> dict[str, Any]:
+    merged = dict(_cli_overrides)
+    for key, value in overrides.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _dotenv_get(key: str) -> str | None:
+    """Read a key from the active ``.env`` file when not set in ``os.environ``."""
+    if key in os.environ:
+        return os.environ[key]
+    env_path = Path(_cli_overrides.get("_env_file") or ".env")
+    if not env_path.is_file():
+        return None
+    val = dotenv_values(env_path).get(key)
+    return str(val) if val is not None else None
+
+
+def _require_llm_credentials(settings: Settings) -> None:
+    """Exit with status 2 if no AI backend credentials are configured."""
+    try:
+        settings.require_llm_credentials()
+    except ValueError as exc:
+        err_console.print("[bold red]Configuration error.[/bold red]")
+        err_console.print("Missing or invalid: ANTHROPIC_API_KEY (or set OPENAI_BASE_URL)")
+        err_console.print("Set them in the environment or a .env file (see .env.example).")
+        raise typer.Exit(code=2) from exc
+
+
+def _build_llm_client(settings: Settings) -> Any:
+    """Build the configured LLM client (OpenAI-compatible or Anthropic)."""
+    _require_llm_credentials(settings)
+    if settings.use_openai:
+        return OpenAICompatClient(
+            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key,
+        )
+    return Anthropic(api_key=settings.anthropic_api_key)
+
+
+def _require_batch_supported(settings: Settings) -> None:
+    """Abort with exit status 2 if Batch API is requested in OpenAI mode."""
+    if settings.use_openai:
+        err_console.print(
+            "[bold red]The Batch API is only supported with native Anthropic; "
+            "use --direct when OPENAI_BASE_URL is set.[/bold red]"
+        )
+        raise typer.Exit(code=2)
+
+
+def load_or_exit(**overrides: Any) -> Settings:
     """Load settings, or explain what is missing and exit with status 2."""
     try:
-        return load_settings()
+        return load_settings(**_merge_overrides(**overrides))
     except ValidationError as exc:
         missing = sorted({str(error["loc"][0]).upper() for error in exc.errors() if error["loc"]})
         err_console.print("[bold red]Configuration error.[/bold red]")
@@ -178,20 +441,25 @@ def load_or_exit() -> Settings:
 
 
 @contextmanager
-def session(*, immich: bool = False, judge: bool = False) -> Iterator[Session]:
+def session(
+    *, immich: bool = False, judge: bool = False, **overrides: Any
+) -> Iterator[Session]:
     """Open the ledger — and optionally the two API clients — for one command.
 
     Args:
         immich: Also build an :class:`~winnow.immich.ImmichClient`.
-        judge: Also build a :class:`~winnow.judge.Judge` over an Anthropic client.
+        judge: Also build a :class:`~winnow.judge.Judge` over the configured LLM client.
+        **overrides: Optional setting overrides from CLI flags.
 
     Yields:
         A :class:`Session`; everything it owns is closed on the way out.
     """
-    settings = load_or_exit()
+    settings = load_or_exit(**overrides)
+    if judge:
+        _require_llm_credentials(settings)
     ledger = Ledger(settings.db_path)
     client = ImmichClient(settings.immich_base, settings.immich_api_key) if immich else None
-    judge_obj = Judge(Anthropic(api_key=settings.anthropic_api_key)) if judge else None
+    judge_obj = Judge(_build_llm_client(settings), settings=settings) if judge else None
     try:
         yield Session(settings=settings, ledger=ledger, immich=client, judge=judge_obj)
     finally:
@@ -279,13 +547,15 @@ def parse_buckets(raw: str) -> set[str]:
 
 
 def _version_callback(value: bool) -> None:
-    """Print the version and exit (eager ``--version`` option)."""
+    """Reset CLI overrides and print the version if requested (eager ``--version`` option)."""
+    _cli_overrides.clear()
     if value:
         console.print(f"winnow {__version__}")
         raise typer.Exit()
 
 
 @app.callback()
+@_with_common_options
 def main(
     version: Annotated[
         bool,
@@ -297,7 +567,15 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Cull an Immich library with Claude: triage, rank, finals, write back."""
+    """Cull an Immich library with AI: triage, rank, finals, write back."""
+
+
+def _stage_summary(settings: Settings, stage: Any) -> str:
+    model = getattr(settings, f"{stage}_model")
+    effort = settings.effort_for(stage)
+    thinking = settings.thinking_tokens_for(stage)
+    max_out = getattr(settings, f"{stage}_max_tokens")
+    return f"{model} (effort={effort}, thinking={thinking}, max_out={max_out})"
 
 
 # --------------------------------------------------------------------------- #
@@ -306,20 +584,24 @@ def main(
 
 
 @app.command()
+@_with_common_options
 def check() -> None:
     """Verify both connections and show the active configuration."""
     settings = load_or_exit()
+    _require_llm_credentials(settings)
 
     heading("Settings")
     table = Table(show_header=False, box=None)
     table.add_column("key", style="bold")
     table.add_column("value")
     table.add_row("immich url", settings.immich_base)
+    if settings.use_openai:
+        table.add_row("openai base url", str(settings.openai_base_url))
     table.add_row("database", str(settings.db_path))
     table.add_row("thumbnail cache", str(settings.cache_dir))
-    table.add_row("triage model", settings.triage_model)
-    table.add_row("rank model", settings.rank_model)
-    table.add_row("finals model", settings.finals_model)
+    table.add_row("triage model", _stage_summary(settings, "triage"))
+    table.add_row("rank model", _stage_summary(settings, "rank"))
+    table.add_row("finals model", _stage_summary(settings, "finals"))
     table.add_row("image edge / quality", f"{settings.image_edge}px / q{settings.jpeg_quality}")
     table.add_row("bws sets", f"{settings.bws_set_size} photos x {settings.bws_appearances}")
     table.add_row("finals", f"top {settings.finals_pool_size}, {settings.finals_rounds} rounds")
@@ -345,19 +627,24 @@ def check() -> None:
             except Exception:
                 pass
 
+    provider_label = "OpenAI endpoint" if settings.use_openai else "Anthropic"
     try:
-        models = Anthropic(api_key=settings.anthropic_api_key).models.list()
+        models = _build_llm_client(settings).models.list()
         count = len(getattr(models, "data", []) or [])
-        console.print(f"[green]OK[/green] Anthropic key accepted ({count} models visible)")
+        if settings.use_openai:
+            console.print(f"[green]OK[/green] OpenAI endpoint reachable ({count} models visible)")
+        else:
+            console.print(f"[green]OK[/green] Anthropic key accepted ({count} models visible)")
     except Exception as exc:  # any SDK/transport failure is a failed check
         ok = False
-        err_console.print(f"[bold red]FAIL[/bold red] Anthropic: {exc}")
+        err_console.print(f"[bold red]FAIL[/bold red] {provider_label}: {exc}")
 
     if not ok:
         raise typer.Exit(code=1)
 
 
 @app.command()
+@_with_common_options
 def scan(
     after: Annotated[
         str,
@@ -422,6 +709,7 @@ def _wait_for_batches(
 
 
 @app.command()
+@_with_common_options
 def triage(
     batch: Annotated[
         bool,
@@ -457,6 +745,7 @@ def triage(
     """Stage 1 — judge every photo, settling bursts with one call each."""
     with session(immich=apply_now, judge=True) as ses:
         if batch:
+            _require_batch_supported(ses.settings)
             if apply_now and not wait:
                 console.print(
                     "[yellow]--apply without --wait does nothing here; "
@@ -489,6 +778,7 @@ def triage(
 
 
 @app.command()
+@_with_common_options
 def poll(
     ingest: Annotated[
         bool, typer.Option(
@@ -514,6 +804,7 @@ def poll(
 ) -> None:
     """Show open Batch API jobs, and optionally ingest the finished ones."""
     with session(immich=apply_now and (ingest or wait), judge=True) as ses:
+        _require_batch_supported(ses.settings)
         open_batches = ses.ledger.open_batches()
         if not open_batches:
             console.print("No open batches.")
@@ -560,6 +851,7 @@ def poll(
 
 
 @app.command()
+@_with_common_options
 def rank(
     limit: Annotated[
         int | None,
@@ -584,6 +876,7 @@ def rank(
 
 
 @app.command()
+@_with_common_options
 def finals(
     allow_demotions: Annotated[
         bool,
@@ -622,6 +915,7 @@ def finals(
 
 
 @app.command()
+@_with_common_options
 def report(
     out: Annotated[
         Path, typer.Option(
@@ -657,6 +951,7 @@ def _print_actions(actions: list[writeback.Action], title: str, verbose: bool) -
 
 
 @app.command()
+@_with_common_options
 def apply(
     buckets: Annotated[
         str, typer.Option(
@@ -764,16 +1059,20 @@ def _run_cycle(
     *,
     after: str,
     before: str,
-    batch: bool,
+    batch: bool | None,
     apply_changes: bool,
     scoring_limit: int | None,
+    **overrides: Any,
 ) -> None:
     """One full pass: scan → triage → rank → finals → apply → report."""
-    with session(immich=True, judge=True) as ses:
+    with session(immich=True, judge=True, **overrides) as ses:
+        if batch is True:
+            _require_batch_supported(ses.settings)
+        use_batch = (not ses.settings.use_openai) if batch is None else batch
         cap = ses.settings.scoring_limit if scoring_limit is None else scoring_limit
         with progress_reporter("Scanning") as report:
             run_scan(ses.settings, ses.ledger, ses.api, after, before, on_progress=report)
-        if batch:
+        if use_batch:
             with progress_reporter("Queueing") as report:
                 batch_id = submit_triage_batch(ses.settings, ses.ledger, ses.claude, None, report)
             if batch_id is not None:
@@ -800,6 +1099,7 @@ def _run_cycle(
 
 
 @app.command()
+@_with_common_options
 def run(
     after: Annotated[
         str | None,
@@ -818,22 +1118,23 @@ def run(
         ),
     ] = None,
     batch: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--batch/--direct",
             envvar="WINNOW_BATCH",
-            help="Triage via the 50%-cheaper Batch API (default), waiting for results.",
+            help="Triage via the 50%-cheaper Batch API (default on Anthropic; "
+            "OpenAI endpoints automatically run direct).",
         ),
-    ] = True,
+    ] = None,
     apply_changes: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--apply/--no-apply",
             envvar="WINNOW_APPLY",
             help="Write every decision to Immich at the end (default). "
             "--no-apply leaves them for a reviewed `winnow apply`.",
         ),
-    ] = True,
+    ] = None,
     scoring_limit: Annotated[
         int | None,
         typer.Option(
@@ -846,19 +1147,27 @@ def run(
 ) -> None:
     """The whole pipeline in one shot: scan → triage → rank → finals → apply → report."""
     started = datetime.now(UTC)
-    window_after = after or "1970-01-01"
-    window_before = before or (started + timedelta(days=1)).date().isoformat()
+    window_after = after or _dotenv_get("WINNOW_AFTER") or "1970-01-01"
+    window_before = (
+        before or _dotenv_get("WINNOW_BEFORE") or (started + timedelta(days=1)).date().isoformat()
+    )
+    if apply_changes is None:
+        raw_apply = (_dotenv_get("WINNOW_APPLY") or "true").strip().lower()
+        resolved_apply = raw_apply not in ("0", "false", "no", "off")
+    else:
+        resolved_apply = apply_changes
     heading(f"Full run — window {window_after} → {window_before}")
     _run_cycle(
         after=window_after,
         before=window_before,
         batch=batch,
-        apply_changes=apply_changes,
+        apply_changes=resolved_apply,
         scoring_limit=scoring_limit,
     )
 
 
 @app.command()
+@_with_common_options
 def watch(
     every: Annotated[
         str, typer.Option(
@@ -866,14 +1175,14 @@ def watch(
         )
     ] = "7d",
     batch: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--batch/--direct",
             envvar="WINNOW_BATCH",
-            help="Triage via the 50%-cheaper Batch API (default) — an unattended "
-            "watcher never minds waiting for the discount.",
+            help="Triage via the 50%-cheaper Batch API (default on Anthropic; "
+            "OpenAI endpoints automatically run direct).",
         ),
-    ] = True,
+    ] = None,
     window_days: Annotated[
         int,
         typer.Option(
@@ -941,6 +1250,7 @@ def watch(
 
 
 @app.command()
+@_with_common_options
 def rejudge(
     stage: Annotated[
         str,
@@ -1043,6 +1353,7 @@ def rejudge(
 
 
 @app.command()
+@_with_common_options
 def status() -> None:
     """Show what the ledger currently holds."""
     with session() as ses:

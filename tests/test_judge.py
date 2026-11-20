@@ -20,6 +20,7 @@ from winnow.judge import (
     TRIAGE_SYSTEM,
     Judge,
     JudgeError,
+    OpenAICompatClient,
     batch_status,
     build_burst_request,
     build_bws_request,
@@ -30,6 +31,7 @@ from winnow.judge import (
     parse_message,
     submit_batch,
     to_batch_request,
+    to_openai_chat_kwargs,
 )
 from winnow.schemas import (
     BurstVerdict,
@@ -722,3 +724,122 @@ def test_batch_results_can_be_parsed_with_parse_message() -> None:
     assert custom_id == "triage_1"
     verdict = parse_message(message, TriageVerdict)
     assert isinstance(verdict, TriageVerdict)
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-compatible translation and client adapter
+# --------------------------------------------------------------------------- #
+
+
+def test_to_openai_chat_kwargs_translates_system_images_and_schema() -> None:
+    anth_kwargs = build_bws_request(
+        "local-gemma4:26b",
+        ["IMG1", "IMG2"],
+        max_tokens=3072,
+        effort="medium",
+        thinking_tokens=2048,
+    )
+    oai_kwargs = to_openai_chat_kwargs(anth_kwargs)
+
+    assert oai_kwargs["model"] == "local-gemma4:26b"
+    assert oai_kwargs["max_tokens"] == 3072
+    assert oai_kwargs["reasoning_effort"] == "medium"
+    assert oai_kwargs["extra_body"] == {
+        "thinking_budget_tokens": 2048,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+    messages = oai_kwargs["messages"]
+    assert messages[0] == {"role": "system", "content": BWS_SYSTEM}
+    user_blocks = messages[1]["content"]
+    assert user_blocks[0] == {"type": "text", "text": "Photo 1:"}
+    assert user_blocks[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,IMG1"},
+    }
+    assert user_blocks[2] == {"type": "text", "text": "Photo 2:"}
+    assert user_blocks[3] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,IMG2"},
+    }
+
+    rf = oai_kwargs["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["strict"] is True
+    assert rf["json_schema"]["schema"] == output_schema(BWSVerdict)
+
+
+def test_to_openai_chat_kwargs_disables_thinking_when_budget_is_zero() -> None:
+    anth_kwargs = build_triage_request(
+        "local-gemma4:26b",
+        "IMG1",
+        max_tokens=1024,
+        effort="none",
+        thinking_tokens=0,
+    )
+    oai_kwargs = to_openai_chat_kwargs(anth_kwargs)
+    assert oai_kwargs["max_tokens"] == 1024
+    assert oai_kwargs["reasoning_effort"] == "none"
+    assert oai_kwargs["extra_body"] == {
+        "thinking_budget_tokens": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _make_oai_stub(
+    content: str | None,
+    *,
+    finish_reason: str = "stop",
+    refusal: str | None = None,
+    prompt_tokens: int = 42,
+    completion_tokens: int = 11,
+    model: str = "local-qwen3.8-27b",
+) -> tuple[OpenAICompatClient, list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=finish_reason,
+                    message=SimpleNamespace(content=content, refusal=refusal),
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            ),
+            model=model,
+        )
+
+    fake_openai = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        models=SimpleNamespace(list=lambda: SimpleNamespace(data=[SimpleNamespace(id=model)])),
+    )
+    return OpenAICompatClient(openai_client=fake_openai), calls
+
+
+def test_openai_compat_client_works_with_judge() -> None:
+    client, calls = _make_oai_stub(PAIR_JSON)
+    result = Judge(client).pair("local-qwen3.8-27b", "AAA", "BBB")
+    assert isinstance(result.verdict, PairVerdict)
+    assert result.verdict.winner == "A"
+    assert (result.input_tokens, result.output_tokens) == (42, 11)
+    assert result.model == "local-qwen3.8-27b"
+    assert len(calls) == 1
+    assert calls[0]["messages"][0]["role"] == "system"
+
+
+def test_openai_compat_client_maps_length_to_max_tokens_stop_reason() -> None:
+    client, calls = _make_oai_stub('{"winner": "A', finish_reason="length")
+    with pytest.raises(JudgeError, match="max_tokens"):
+        Judge(client).pair("local-qwen3.8-27b", "AAA", "BBB")
+    assert len(calls) == 1  # terminal stop reason is not retried
+
+
+def test_openai_compat_client_maps_content_filter_to_refusal() -> None:
+    client, calls = _make_oai_stub(None, finish_reason="content_filter")
+    with pytest.raises(JudgeError, match="declined to judge"):
+        Judge(client).triage("extract-light", "AAA")
+    assert len(calls) == 1

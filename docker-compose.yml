@@ -38,7 +38,10 @@ services:
       IMMICH_URL: ${WINNOW_IMMICH_URL:-http://immich-server:2283}
       # These two come from the stack's .env (via env_file above):
       #   IMMICH_API_KEY      Immich → Account Settings → API Keys
-      #   ANTHROPIC_API_KEY   console.anthropic.com
+      #   ANTHROPIC_API_KEY   console.anthropic.com (optional if OPENAI_BASE_URL is set)
+      # Or use an OpenAI-compatible API endpoint:
+      # OPENAI_BASE_URL: http://localhost:11434/v1
+      # OPENAI_API_KEY: ""
 
       # ---- storage (defaults baked into the image; both live on /data) ----
       # DB_PATH: /data/winnow.db          # SQLite ledger — Winnow's memory
@@ -48,6 +51,20 @@ services:
       # TRIAGE_MODEL: claude-haiku-4-5    # stage 1: every photo
       # RANK_MODEL: claude-sonnet-5       # stage 2: best-worst sets
       # FINALS_MODEL: claude-opus-5       # stage 3: head-to-head finals
+
+      # ---- thinking effort & token budgets per stage -----------------------
+      # TRIAGE_EFFORT: low                # none (0), low, medium, high
+      # RANK_EFFORT: medium
+      # FINALS_EFFORT: high
+      # LOW_THINKING_TOKENS: "1024"       # default thinking budget for low effort
+      # MEDIUM_THINKING_TOKENS: "2048"    # default thinking budget for medium effort
+      # HIGH_THINKING_TOKENS: "4096"      # default thinking budget for high effort
+      # TRIAGE_THINKING_TOKENS: ""        # optional explicit cap on thinking tokens (0 disables)
+      # RANK_THINKING_TOKENS: ""
+      # FINALS_THINKING_TOKENS: ""
+      # TRIAGE_MAX_TOKENS: "1024"         # reserved JSON response tokens (added to thinking budget)
+      # RANK_MAX_TOKENS: "1024"
+      # FINALS_MAX_TOKENS: "1024"
 
       # ---- thumbnail preparation -------------------------------------------
       # IMAGE_EDGE: "768"                 # long edge (px) sent to the judge
