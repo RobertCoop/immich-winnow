@@ -14,6 +14,7 @@ from winnow.immich import ImmichClient
 from winnow.ledger import Ledger
 from winnow.pipeline import writeback
 from winnow.pipeline.finals import run_finals
+from winnow.pipeline.triage import apply_triage_verdict
 
 BASE = "http://immich.test:2283"
 
@@ -131,6 +132,15 @@ def test_album_min_stars_four_includes_both_bands(tmp_path):
     actions = writeback.plan(ledger, album="Best", album_min_stars=4)
     (album,) = [a for a in actions if a.bucket == "album"]
     assert album.api_ops[0]["asset_ids"] == sorted([A, B])
+
+
+def test_album_min_stars_three_includes_three_star_band(tmp_path):
+    ledger = _seed_starred_ledger(tmp_path)
+    ledger.upsert_assets([_asset_row(D)])
+    ledger.set_decision(D, "three_star", {"stars": 3, "rank": 3})
+    actions = writeback.plan(ledger, album="Best", album_min_stars=3)
+    (album,) = [a for a in actions if a.bucket == "album"]
+    assert album.api_ops[0]["asset_ids"] == sorted([A, B, D])
 
 
 def test_no_album_action_when_disabled(tmp_path):
@@ -528,6 +538,112 @@ def test_full_spectrum_rates_the_whole_library(settings_env, monkeypatch, tmp_pa
     assert buckets["mid-ok"] == "two_star"
     assert buckets["mid-poor"] == "one_star"
     assert "shot" not in buckets
+
+
+def test_full_spectrum_rates_photos_triaged_into_middle_bucket(
+    settings_env, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("FULL_STAR_SPECTRUM", "true")
+    settings = load_settings()
+    ledger = _seed_scored(tmp_path, 4)
+    extra = [_asset_row("mid-ok"), _asset_row("mid-poor"), _asset_row("rej"), _asset_row("shot")]
+    ledger.upsert_assets(extra)
+    apply_triage_verdict(
+        ledger,
+        "mid-ok",
+        TriageVerdict(
+            category="photo",
+            verdict="neutral",
+            technical_score=6,
+            reasons=["ok"],
+            confidence="medium",
+        ),
+        "test-model",
+    )
+    apply_triage_verdict(
+        ledger,
+        "mid-poor",
+        TriageVerdict(
+            category="photo",
+            verdict="neutral",
+            technical_score=2,
+            reasons=["soft"],
+            confidence="medium",
+        ),
+        "test-model",
+    )
+    apply_triage_verdict(
+        ledger,
+        "rej",
+        TriageVerdict(
+            category="photo",
+            verdict="reject",
+            technical_score=1,
+            reasons=["blur"],
+            confidence="high",
+        ),
+        "test-model",
+    )
+    apply_triage_verdict(
+        ledger,
+        "shot",
+        TriageVerdict(
+            category="screenshot",
+            verdict="neutral",
+            technical_score=6,
+            reasons=["ui"],
+            confidence="high",
+        ),
+        "test-model",
+    )
+
+    stats = run_finals(settings, ledger, _NeverCalledJudge())
+    assert stats.two_star == 1 and stats.one_star == 1
+    buckets = {r["asset_id"]: r["bucket"] for r in ledger.decisions()}
+    assert buckets["mid-ok"] == "two_star"
+    assert buckets["mid-poor"] == "one_star"
+    assert buckets["rej"] == "reject"
+    assert buckets["shot"] == "nonphoto"
+
+
+def test_full_spectrum_rates_middle_when_finals_pool_too_small(
+    settings_env, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("FULL_STAR_SPECTRUM", "true")
+    settings = load_settings()
+    ledger = Ledger(tmp_path / "small.db")
+    ledger.upsert_assets([_asset_row("mid-ok"), _asset_row("mid-poor")])
+    apply_triage_verdict(
+        ledger,
+        "mid-ok",
+        TriageVerdict(
+            category="photo",
+            verdict="neutral",
+            technical_score=6,
+            reasons=["ok"],
+            confidence="medium",
+        ),
+        "test-model",
+    )
+    apply_triage_verdict(
+        ledger,
+        "mid-poor",
+        TriageVerdict(
+            category="photo",
+            verdict="neutral",
+            technical_score=3,
+            reasons=["soft"],
+            confidence="medium",
+        ),
+        "test-model",
+    )
+
+    stats = run_finals(settings, ledger, _NeverCalledJudge())
+    assert stats.pool == 0
+    assert stats.two_star == 1 and stats.one_star == 1
+    buckets = {r["asset_id"]: r["bucket"] for r in ledger.decisions()}
+    assert buckets["mid-ok"] == "two_star"
+    assert buckets["mid-poor"] == "one_star"
 
 
 def test_low_star_writeback_is_rating_only(tmp_path):

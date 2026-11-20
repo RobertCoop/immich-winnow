@@ -175,6 +175,8 @@ def run_finals(
     pool = _pool(ledger, max(settings.finals_pool_size, 2 * five_target))
     stats.pool = len(pool)
     if len(pool) < 2:
+        if settings.full_star_spectrum:
+            _star_the_middle(ledger, {}, stats)
         emit(on_progress, "finals pool too small to judge")
         return stats
 
@@ -322,7 +324,11 @@ def _star_the_middle(ledger: Ledger, bands: dict[str, int], stats: FinalsStats) 
     decision (reject, non-photo, burst loser, or a band above) are skipped, as
     is anything that is not a photograph.
     """
-    decided = {str(row["asset_id"]) for row in ledger.decisions()}
+    decided = {
+        str(row["asset_id"])
+        for row in ledger.decisions()
+        if row.get("bucket") != "middle"
+    }
     for row in ledger.triage_rows():
         asset_id = str(row["asset_id"])
         if asset_id in bands or asset_id in decided or row.get("category") != "photo":

@@ -287,6 +287,15 @@ def _enrich_actions(
     return actions
 
 
+_STAR_BUCKET_BY_RATING: dict[int, str] = {
+    5: "five_star",
+    4: "four_star",
+    3: "three_star",
+    2: "two_star",
+    1: "one_star",
+}
+
+
 def _album_action(ledger: Ledger, album: str, min_stars: int) -> Action | None:
     """One idempotent group action collecting starred photos into an album.
 
@@ -295,7 +304,9 @@ def _album_action(ledger: Ledger, album: str, min_stars: int) -> Action | None:
     action can be replanned every run and newly-configured albums pick up
     photos crowned in earlier runs.
     """
-    wanted = {"five_star"} if min_stars >= 5 else {"five_star", "four_star"}
+    wanted = {
+        bucket for stars, bucket in _STAR_BUCKET_BY_RATING.items() if stars >= min_stars
+    }
     asset_ids = sorted(
         str(row["asset_id"])
         for row in ledger.decisions()
