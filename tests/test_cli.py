@@ -211,8 +211,8 @@ def immich_api() -> Iterator[respx.MockRouter]:
                 ],
             )
         )
-        router.put(url__regex=re.escape(API) + r"/tags/[^/]+/assets", name="tag_assets").mock(
-            return_value=httpx.Response(200, json={})
+        router.put(f"{API}/tags/assets", name="tag_assets").mock(
+            return_value=httpx.Response(200, json={"count": 1})
         )
         router.put(url__regex=re.escape(API) + r"/assets/[^/]+$", name="update_asset").mock(
             return_value=httpx.Response(200, json={"id": "ok"})

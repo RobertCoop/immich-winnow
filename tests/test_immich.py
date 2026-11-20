@@ -592,6 +592,56 @@ def test_tag_assets_sends_chunks(mock_api: respx.MockRouter, client: ImmichClien
     assert body_of(route, 2) == {"ids": ["a5"]}
 
 
+def test_bulk_tag_assets(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    route = mock_api.put("/tags/assets").mock(return_value=httpx.Response(200, json={"count": 4}))
+    assert client.bulk_tag_assets(["t1", "t2"], ["a1", "a2"]) is None
+    assert body_of(route) == {"tagIds": ["t1", "t2"], "assetIds": ["a1", "a2"]}
+
+
+def test_bulk_tag_assets_deduplicates_ids(
+    mock_api: respx.MockRouter, client: ImmichClient
+) -> None:
+    route = mock_api.put("/tags/assets").mock(return_value=httpx.Response(200, json={"count": 4}))
+    client.bulk_tag_assets(["t1", "t2", "t1"], ["a1", "a2", "a1"])
+    assert body_of(route) == {"tagIds": ["t1", "t2"], "assetIds": ["a1", "a2"]}
+
+
+def test_bulk_tag_assets_empty_is_noop(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    client.bulk_tag_assets([], ["a1"])
+    client.bulk_tag_assets(["t1"], [])
+    assert not mock_api.calls
+
+
+def test_bulk_tag_assets_chunks_by_assets(
+    mock_api: respx.MockRouter, client: ImmichClient
+) -> None:
+    client.TAG_ASSETS_CHUNK = 2
+    route = mock_api.put("/tags/assets").mock(return_value=httpx.Response(200, json={"count": 2}))
+    client.bulk_tag_assets(["t1", "t2"], ["a1", "a2", "a3", "a4", "a5"])
+    assert route.call_count == 3
+    assert body_of(route, 0) == {"tagIds": ["t1", "t2"], "assetIds": ["a1", "a2"]}
+    assert body_of(route, 1) == {"tagIds": ["t1", "t2"], "assetIds": ["a3", "a4"]}
+    assert body_of(route, 2) == {"tagIds": ["t1", "t2"], "assetIds": ["a5"]}
+
+
+def test_bulk_tag_assets_404_falls_back_to_tag_assets(
+    mock_api: respx.MockRouter, client: ImmichClient
+) -> None:
+    mock_api.put("/tags/assets").mock(return_value=httpx.Response(404, text="not found"))
+    t1_route = mock_api.put("/tags/t1/assets").mock(return_value=httpx.Response(200, json=[]))
+    t2_route = mock_api.put("/tags/t2/assets").mock(return_value=httpx.Response(200, json=[]))
+    client.bulk_tag_assets(["t1", "t2"], ["a1", "a2"])
+    assert body_of(t1_route) == {"ids": ["a1", "a2"]}
+    assert body_of(t2_route) == {"ids": ["a1", "a2"]}
+
+
+def test_bulk_tag_assets_error(mock_api: respx.MockRouter, client: ImmichClient) -> None:
+    mock_api.put("/tags/assets").mock(return_value=httpx.Response(500, text="server error"))
+    with pytest.raises(ImmichError) as excinfo:
+        client.bulk_tag_assets(["t1", "t2"], ["a1"])
+    assert excinfo.value.status_code == 500
+
+
 def test_untag_assets_sends_chunks(mock_api: respx.MockRouter, client: ImmichClient) -> None:
     client.TAG_ASSETS_CHUNK = 2
     route = mock_api.delete("/tags/t1/assets").mock(return_value=httpx.Response(200, json=[]))
