@@ -13,7 +13,7 @@ Batch API submission (:func:`to_batch_request`).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +22,7 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 from anthropic.types.messages.batch_create_params import Request
 from pydantic import BaseModel
 
+from winnow.prompts import PromptLibrary, PromptTask
 from winnow.schemas import (
     BurstVerdict,
     BWSVerdict,
@@ -119,167 +120,13 @@ class JudgeResult:
 # Prompts
 # --------------------------------------------------------------------------- #
 
-#: Shared closing line, appended to every system prompt.
-_JSON_ONLY = (
-    "Reply with JSON matching the schema. JSON only — no prose, no markdown "
-    "fences, no commentary before or after.\n"
-)
+_DEFAULT_PROMPTS = PromptLibrary.default()
 
-TRIAGE_SYSTEM = """\
-You are the culling eye of a working photographer, reviewing someone's PERSONAL
-photo library: family, friends, pets, travel, ordinary days. Your job is to be
-ruthless but fair. Hide the failures, flag the standouts, and leave the large
-ordinary middle alone.
-
-CATEGORIES — judge what the image IS, not how useful it is.
-- photo: an actual photograph, made by pointing a camera or phone at the world.
-- screenshot: a capture of a screen — app UI, web page, chat thread, map, ticket.
-- document: a photo or scan whose point is the information on it — receipts,
-  forms, whiteboards, book pages, labels, business cards, signage.
-- meme: image macros, reaction images, saved social graphics, wallpapers, and
-  anything else downloaded rather than taken.
-- other: illustrations, renders, generated images, or anything fitting none of
-  the above.
-Screenshots, documents and memes are NOT photographs.
-
-A non-photo category means the image will be ARCHIVED — hidden from the main
-timeline. Apply the same caution you would to a reject: when you are not sure
-an image is a screenshot, document, meme or other, call it a photo. Archiving
-something its owner made, was sent, or scanned on purpose is the expensive
-mistake, and a scanned drawing or a shared family picture is a photograph as
-far as this decision is concerned.
-
-VERDICTS
-- reject: the frame failed badly enough that its owner would want it hidden.
-  Badly blurred or smeared by motion; hopelessly under- or over-exposed with no
-  recoverable detail; an accidental shot (pocket, floor, ceiling, lens cap, a
-  thumb over the lens); eyes closed or mid-blink on EVERY person in the frame;
-  or otherwise unusable. A merely mediocre photo is NOT a reject.
-- candidate: a standout worth cherishing. Sharp where it matters, well composed,
-  and emotionally engaging — a photo its owner would print, share, or hang.
-- neutral: everything else. Most photographs are neutral. That is the correct
-  answer far more often than either extreme.
-
-TECHNICAL_SCORE — craft only, 0 to 10, ignoring how much you like the subject:
-  0-2  unusable: hopeless blur, black or blown-out frame, accidental capture
-  3-4  poor: subject soft, badly lit, careless or distracting framing
-  5-6  ordinary: correctly exposed and acceptably sharp, and nothing more
-  7    good: clean focus, decent light, deliberate composition
-  8    very good: real strength in light or composition
-  9    excellent: several strengths at once — a photograph, not a snapshot
-  10   exceptional: light, moment and composition all land together. Rare.
-
-CONFIDENCE
-Use "high" ONLY when the call is unmistakable: a plainly ruined frame, an
-obvious screenshot, an undeniably beautiful image. Use "medium" when the
-evidence is clear but a thoughtful person could disagree. Use "low" when you
-are essentially guessing.
-
-SENTIMENTAL VALUE IS UNKNOWABLE TO YOU. A dim, crooked snapshot may be the only
-surviving picture of someone who has died; a flawless landscape may mean
-nothing at all. When a photo is technically weak but holds people, pets, or a
-moment that clearly mattered to somebody, lean neutral with low or medium
-confidence instead of rejecting it. Reserve high-confidence rejects for frames
-whose failure is purely technical and total.
-
-REASONS
-Give one to three short, concrete phrases naming what you actually see:
-"subject motion blur", "backlit, face in shadow", "both children looking away",
-"clean rim light on the dog". Do not hedge and do not restate the verdict.
-
-CAPTION AND KEYWORDS
-Also describe the photo for search. caption: one plain factual sentence, at
-most ~120 characters, naming the subject, setting and action — never start
-with "A photo of" or "An image of". keywords: three to six lowercase words or
-short phrases a person would search for (subjects, scene, activity, notable
-objects; e.g. "beach", "golden retriever", "birthday cake"). No hashtags, no
-duplicates of the caption verbatim, no quality judgments.
-
-""" + _JSON_ONLY
-
-BURST_SYSTEM = """\
-You are picking the single best frame out of a burst: a run of near-identical
-photographs of the same subject, taken seconds apart, from someone's PERSONAL
-photo library. One frame survives as the keeper; the rest are hidden as
-redundant duplicates.
-
-The photos are labeled "Photo 1", "Photo 2", and so on, in the order they were
-taken. Compare them against each other — not against some ideal — in this order
-of importance:
-
-1. SHARPNESS ON THE SUBJECT. The eyes, the face, the point of interest. A frame
-   that is sharp where it matters beats one that is merely sharp somewhere.
-2. EXPRESSIONS AND EYES. Eyes open, no mid-blink, no mid-word grimace. With
-   several people in frame, favor the shot where the most of them look good at
-   the same time.
-3. THE MOMENT. Peak action, the fuller laugh, the gesture completed rather than
-   half-formed.
-4. COMPOSITION AND FRAMING. Cleaner edges, less clutter, better balance, nothing
-   important cropped off.
-5. EXPOSURE AND COLOR, as a tiebreaker.
-
-best_index is the 1-based label of the keeper.
-reject_indices lists the 1-based labels of the other photos in the burst —
-normally every one of them except the keeper. Leave a second frame out of
-reject_indices only when it is genuinely a different picture worth keeping on
-its own merits (a different subject, a different moment), never merely because
-it was a close second.
-
-note is one sentence naming what decided it, e.g. "3 is the only frame with
-both children's eyes open".
-
-Be decisive: exactly one best_index, chosen even when the frames are close.
-
-""" + _JSON_ONLY
-
-BWS_SYSTEM = """\
-You are ranking photographs from someone's PERSONAL photo library by naming the
-two extremes of a set: the single best photo and the single worst.
-
-The photos are labeled "Photo 1", "Photo 2", and so on. They are usually
-unrelated — often different subjects, days and places — so weigh each on its
-own merits and then compare:
-
-- Is the subject sharp and clearly rendered?
-- Do the light and exposure serve the picture, or fight it?
-- Is the composition deliberate — clean edges, balance, nothing important cut
-  off or competing for attention?
-- Does the moment land? Expression, gesture, timing, atmosphere.
-- Would its owner stop scrolling on it?
-
-Judge the photograph, not the subject: a beautifully made picture of something
-dull beats a clumsy picture of something charming.
-
-best_index is the one you would put in front of someone first.
-worst_index is the one you would drop first.
-Both are 1-based labels within this set, and they MUST be different photos.
-
-Be decisive. When two are close, choose one anyway and say why in a single
-sentence in note. A tie is not an available answer.
-
-""" + _JSON_ONLY
-
-PAIR_SYSTEM = """\
-You are judging a head-to-head between two photographs from someone's PERSONAL
-photo library, shown as "Photo A" and "Photo B".
-
-Both have already survived earlier rounds, so assume both are good. Decide which
-is the stronger photograph:
-
-- Sharpness where it counts — the eyes, the face, the subject.
-- Light: its quality and direction, and whether it shapes the subject or
-  flattens it.
-- Composition: framing, balance, clean edges, an uncluttered background.
-- The moment: expression, gesture, timing, the feeling it carries.
-- Overall impact — which one you would still remember an hour from now.
-
-winner is "A", "B", or "tie". Use "tie" ONLY when the two are genuinely
-inseparable in quality; a small but real preference is a win, not a tie.
-
-note is one sentence naming the deciding difference, e.g. "B — the light on her
-face is softer and the background is far less busy".
-
-""" + _JSON_ONLY
+#: Default rendered system prompts (loaded from packaged Jinja2 templates).
+TRIAGE_SYSTEM = _DEFAULT_PROMPTS.render("triage", model="", image_count=1)
+BURST_SYSTEM = _DEFAULT_PROMPTS.render("burst", model="", image_count=2)
+BWS_SYSTEM = _DEFAULT_PROMPTS.render("bws", model="", image_count=2)
+PAIR_SYSTEM = _DEFAULT_PROMPTS.render("pair", model="", image_count=2)
 
 _TRIAGE_INSTRUCTION = (
     "Judge this photograph: category, verdict, technical_score, reasons, confidence. "
@@ -372,18 +219,22 @@ def _request(
     }
 
 
-def build_triage_request(model: str, image_b64: str) -> dict[str, Any]:
+def build_triage_request(
+    model: str, image_b64: str, *, system: str | None = None
+) -> dict[str, Any]:
     """Kwargs for a single-photo stage-1 triage call."""
     return _request(
         model=model,
         max_tokens=TRIAGE_MAX_TOKENS,
-        system=TRIAGE_SYSTEM,
+        system=TRIAGE_SYSTEM if system is None else system,
         content=[_image_block(image_b64), {"type": "text", "text": _TRIAGE_INSTRUCTION}],
         model_cls=TriageVerdict,
     )
 
 
-def build_burst_request(model: str, images_b64: list[str]) -> dict[str, Any]:
+def build_burst_request(
+    model: str, images_b64: list[str], *, system: str | None = None
+) -> dict[str, Any]:
     """Kwargs for a pick-the-best call over a burst of near-identical frames.
 
     Raises:
@@ -403,13 +254,15 @@ def build_burst_request(model: str, images_b64: list[str]) -> dict[str, Any]:
     return _request(
         model=model,
         max_tokens=TRIAGE_MAX_TOKENS,
-        system=BURST_SYSTEM,
+        system=BURST_SYSTEM if system is None else system,
         content=content,
         model_cls=BurstVerdict,
     )
 
 
-def build_bws_request(model: str, images_b64: list[str]) -> dict[str, Any]:
+def build_bws_request(
+    model: str, images_b64: list[str], *, system: str | None = None
+) -> dict[str, Any]:
     """Kwargs for a best-worst-scaling call over a set of unrelated photos."""
     if len(images_b64) < 2:
         raise JudgeError(f"a BWS set needs at least 2 photos, got {len(images_b64)}")
@@ -419,21 +272,23 @@ def build_bws_request(model: str, images_b64: list[str]) -> dict[str, Any]:
     return _request(
         model=model,
         max_tokens=RANK_MAX_TOKENS,
-        system=BWS_SYSTEM,
+        system=BWS_SYSTEM if system is None else system,
         content=content,
         model_cls=BWSVerdict,
         effort=RANK_EFFORT,
     )
 
 
-def build_pair_request(model: str, image_a_b64: str, image_b_b64: str) -> dict[str, Any]:
+def build_pair_request(
+    model: str, image_a_b64: str, image_b_b64: str, *, system: str | None = None
+) -> dict[str, Any]:
     """Kwargs for a finals head-to-head between photo A and photo B."""
     content = _labeled_images([image_a_b64, image_b_b64], ["A", "B"])
     content.append({"type": "text", "text": _PAIR_INSTRUCTION})
     return _request(
         model=model,
         max_tokens=RANK_MAX_TOKENS,
-        system=PAIR_SYSTEM,
+        system=PAIR_SYSTEM if system is None else system,
         content=content,
         model_cls=PairVerdict,
         effort=RANK_EFFORT,
@@ -518,16 +373,44 @@ def _check_indices(indices: Sequence[int], count: int, what: str) -> None:
 class Judge:
     """Runs judging calls against a Claude client, retrying unparseable replies."""
 
-    def __init__(self, client: Any, *, max_parse_retries: int = 1) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        max_parse_retries: int = 1,
+        prompts: PromptLibrary | None = None,
+    ) -> None:
         """Wrap ``client`` (anything with ``messages.create``).
 
         Args:
             client: An ``anthropic.Anthropic`` instance or compatible stub.
             max_parse_retries: Extra attempts after a parse or validation
                 failure. The default of 1 means two calls at most.
+            prompts: Optional compiled :class:`~winnow.prompts.PromptLibrary`
+                used to render system prompts dynamically per request.
         """
         self.client = client
         self.max_parse_retries = max_parse_retries
+        self.prompts = prompts
+
+    def _resolve_system(
+        self,
+        task: PromptTask,
+        model: str,
+        image_count: int,
+        system: str | None,
+        prompt_context: Mapping[str, Any] | None,
+    ) -> str | None:
+        if system is not None:
+            return system
+        if self.prompts is not None:
+            return self.prompts.render(
+                task,
+                model=model,
+                image_count=image_count,
+                **(prompt_context or {}),
+            )
+        return None
 
     def _run(
         self,
@@ -571,11 +454,29 @@ class Judge:
             f"{last_error}"
         ) from last_error
 
-    def triage(self, model: str, image_b64: str) -> JudgeResult:
+    def triage(
+        self,
+        model: str,
+        image_b64: str,
+        *,
+        system: str | None = None,
+        prompt_context: Mapping[str, Any] | None = None,
+    ) -> JudgeResult:
         """Judge a single photo; ``result.verdict`` is a ``TriageVerdict``."""
-        return self._run(build_triage_request(model, image_b64), TriageVerdict)
+        resolved_system = self._resolve_system("triage", model, 1, system, prompt_context)
+        return self._run(
+            build_triage_request(model, image_b64, system=resolved_system),
+            TriageVerdict,
+        )
 
-    def burst(self, model: str, images_b64: list[str]) -> JudgeResult:
+    def burst(
+        self,
+        model: str,
+        images_b64: list[str],
+        *,
+        system: str | None = None,
+        prompt_context: Mapping[str, Any] | None = None,
+    ) -> JudgeResult:
         """Pick the best frame of a burst; ``result.verdict`` is a ``BurstVerdict``."""
         count = len(images_b64)
 
@@ -587,9 +488,21 @@ class Judge:
                     f"best_index {verdict.best_index} also appears in reject_indices"
                 )
 
-        return self._run(build_burst_request(model, images_b64), BurstVerdict, validate)
+        resolved_system = self._resolve_system("burst", model, count, system, prompt_context)
+        return self._run(
+            build_burst_request(model, images_b64, system=resolved_system),
+            BurstVerdict,
+            validate,
+        )
 
-    def bws(self, model: str, images_b64: list[str]) -> JudgeResult:
+    def bws(
+        self,
+        model: str,
+        images_b64: list[str],
+        *,
+        system: str | None = None,
+        prompt_context: Mapping[str, Any] | None = None,
+    ) -> JudgeResult:
         """Name best and worst of a set; ``result.verdict`` is a ``BWSVerdict``."""
         count = len(images_b64)
 
@@ -601,11 +514,35 @@ class Judge:
                     f"best_index and worst_index are both {verdict.best_index}"
                 )
 
-        return self._run(build_bws_request(model, images_b64), BWSVerdict, validate)
+        resolved_system = self._resolve_system("bws", model, count, system, prompt_context)
+        return self._run(
+            build_bws_request(model, images_b64, system=resolved_system),
+            BWSVerdict,
+            validate,
+        )
 
-    def pair(self, model: str, a_b64: str, b_b64: str) -> JudgeResult:
+    def pair(
+        self,
+        model: str,
+        a_b64: str,
+        b_b64: str,
+        *,
+        system: str | None = None,
+        prompt_context: Mapping[str, Any] | None = None,
+    ) -> JudgeResult:
         """Judge A vs B; ``result.verdict`` is a ``PairVerdict``."""
-        return self._run(build_pair_request(model, a_b64, b_b64), PairVerdict)
+        resolved_system = self._resolve_system("pair", model, 2, system, prompt_context)
+        return self._run(
+            build_pair_request(model, a_b64, b_b64, system=resolved_system),
+            PairVerdict,
+        )
+
+
+def resolve_prompts(judge: Any, settings: Any) -> PromptLibrary:
+    """Return ``judge.prompts`` when available, otherwise load from ``settings``."""
+    if isinstance(judge, Judge) and judge.prompts is not None:
+        return judge.prompts
+    return PromptLibrary.from_settings(settings)
 
 
 # --------------------------------------------------------------------------- #

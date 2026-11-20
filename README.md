@@ -226,6 +226,10 @@ file works too — never commit it).
 | `FIVE_STAR_FAVORITE` | `true` | Also mark five-star photos as Immich favorites. |
 | `BURST_GAP_SECONDS` | `10` | Max seconds between frames judged as one burst. |
 | `IMAGE_EDGE` | `768` | Long edge (px) of what the judges see. |
+| `TRIAGE_PROMPT_PATH` | *(built-in)* | Optional path to a custom Jinja2 template for stage-1 single-photo triage. |
+| `BURST_PROMPT_PATH` | *(built-in)* | Optional path to a custom Jinja2 template for stage-1 burst picks. |
+| `BWS_PROMPT_PATH` | *(built-in)* | Optional path to a custom Jinja2 template for stage-2 BWS ranking sets. |
+| `PAIR_PROMPT_PATH` | *(built-in)* | Optional path to a custom Jinja2 template for stage-3 head-to-head finals. |
 
 ### Command flags as env vars (`WINNOW_*`)
 
@@ -267,6 +271,7 @@ uv run winnow report --out winnow-report.html        # HTML contact sheet — re
 uv run winnow apply --dry-run                        # see exactly what would change (-v for the full list)
 uv run winnow apply --live --buckets reject,stars    # write back to Immich (asks first; -y to skip)
 uv run winnow status                                 # ledger summary any time
+uv run winnow prompts                                # inspect/validate system prompt templates
 uv run winnow rejudge --missing-captions -y          # forget pre-caption verdicts, then re-triage
 ```
 
@@ -285,6 +290,42 @@ changes to Immich immediately instead of waiting for a reviewed `apply`;
 Start with a few days of photos to calibrate, then widen the date range.
 `scan`/`triage` are incremental — re-running with an overlapping range never
 re-judges photos it has already seen.
+
+### Customizing system prompts
+
+Winnow's four system prompts (`triage`, `burst`, `bws`, `pair`) are packaged
+Jinja2 templates. You can override individual prompts on disk without touching
+the rest by setting any combination of `TRIAGE_PROMPT_PATH`,
+`BURST_PROMPT_PATH`, `BWS_PROMPT_PATH`, and `PAIR_PROMPT_PATH`.
+
+```bash
+# 1. Export the built-in templates as a starting point (or write your own)
+uv run winnow prompts --export ./prompts
+
+# 2. Override just the task(s) you want in .env or Docker Compose:
+#    volumes:
+#      - ./prompts:/prompts:ro
+#    environment:
+#      TRIAGE_PROMPT_PATH: /prompts/triage.j2
+
+# 3. Validate and preview the rendered prompt:
+uv run winnow prompts --render triage
+uv run winnow check
+```
+
+Custom templates run in a sandboxed Jinja2 environment with `StrictUndefined`:
+- **Inheritance & partials:** Extend built-ins via `{% extends "default/triage.j2" %}`
+  (blocks: `intro`, `criteria`, `output_format`, `extra`, `json_only`) or
+  include `{% include "default/_json_only.j2" %}` and sibling files in the
+  same directory.
+- **Runtime & photo variables:** `task`, `model`, `image_count`, `batch_size`,
+  `total_photos`, `library_size`, `settings.*` (non-secret tuning fields only),
+  plus indexed asset metadata (`photos`, `photo` for triage, `photo_a`/`photo_b`
+  for finals pairs — with `id`, `filename`, `taken_at`, `camera`, `width`,
+  `height`, `immich_rating`, `immich_description`, `burst_id`).
+- **Privacy by default:** Sent JPEGs still have embedded EXIF/XMP/ICC blocks
+  stripped in `images.py`, and the built-in templates do not interpolate photo
+  metadata unless your custom template explicitly references it.
 
 ## What gets written to Immich
 

@@ -1,0 +1,36 @@
+{% block intro -%}
+You are picking the single best frame out of a burst: a run of near-identical
+photographs of the same subject, taken seconds apart, from someone's PERSONAL
+photo library. One frame survives as the keeper; the rest are hidden as
+redundant duplicates.
+{% endblock %}
+{% block criteria -%}
+The photos are labeled "Photo 1", "Photo 2", and so on, in the order they were
+taken. Compare them against each other — not against some ideal — in this order
+of importance:
+
+1. SHARPNESS ON THE SUBJECT. The eyes, the face, the point of interest. A frame
+   that is sharp where it matters beats one that is merely sharp somewhere.
+2. EXPRESSIONS AND EYES. Eyes open, no mid-blink, no mid-word grimace. With
+   several people in frame, favor the shot where the most of them look good at
+   the same time.
+3. THE MOMENT. Peak action, the fuller laugh, the gesture completed rather than
+   half-formed.
+4. COMPOSITION AND FRAMING. Cleaner edges, less clutter, better balance, nothing
+   important cropped off.
+5. EXPOSURE AND COLOR, as a tiebreaker.
+{% endblock %}
+{% block output_format -%}
+best_index is the 1-based label of the keeper.
+reject_indices lists the 1-based labels of the other photos in the burst —
+normally every one of them except the keeper. Leave a second frame out of
+reject_indices only when it is genuinely a different picture worth keeping on
+its own merits (a different subject, a different moment), never merely because
+it was a close second.
+
+note is one sentence naming what decided it, e.g. "3 is the only frame with
+both children's eyes open".
+
+Be decisive: exactly one best_index, chosen even when the frames are close.
+{% endblock %}{% block extra %}{% endblock %}
+{% block json_only %}{% include "default/_json_only.j2" %}{% endblock %}

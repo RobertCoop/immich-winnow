@@ -86,6 +86,13 @@ services:
       # KEYWORD_TAGS: "false"            # keywords -> real Immich tags under the prefix
       # KEYWORD_TAG_PREFIX: "kw"         # "" writes keywords as plain top-level tags
 
+      # ---- system prompt templates (bind-mount ./prompts:/prompts:ro) --------
+      # Override only the tasks you customize; unset ones use packaged defaults.
+      # TRIAGE_PROMPT_PATH: /prompts/triage.j2
+      # BURST_PROMPT_PATH: /prompts/burst.j2
+      # BWS_PROMPT_PATH: /prompts/bws.j2
+      # PAIR_PROMPT_PATH: /prompts/pair.j2
+
       # ---- command-flag equivalents (WINNOW_*) ---------------------------------
       # Every CLI flag is also an env var, so the watcher can be tuned here
       # without a custom `command:`. The most useful ones:
@@ -99,6 +106,7 @@ services:
       #  WINNOW_LIMIT, WINNOW_BUCKETS, WINNOW_LIVE, WINNOW_YES, ...)
     volumes:
       - immich-winnow-data:/data  # ledger, thumbnail cache, reports
+      # - ./prompts:/prompts:ro    # optional custom Jinja2 system prompt templates
 
 volumes:
   immich-winnow-data:

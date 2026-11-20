@@ -18,9 +18,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from winnow.config import Settings
-from winnow.judge import FATAL_ERRORS, ITEM_ERRORS, Judge
+from winnow.judge import FATAL_ERRORS, ITEM_ERRORS, Judge, resolve_prompts
 from winnow.ledger import Ledger
 from winnow.pipeline.scan import ProgressFn, emit, load_thumb_b64
+from winnow.prompts import photo_context
 from winnow.ranking import bradley_terry, build_bws_sets, bws_to_pairs, rank_scores
 
 __all__ = [
@@ -161,6 +162,7 @@ def run_rank(
     Returns:
         Counters describing the run.
     """
+    prompts = resolve_prompts(judge, settings)
     stats = RankStats()
     all_candidates = [row["asset_id"] for row in ledger.candidates(settings.candidate_score_min)]
     stats.candidates = len(all_candidates)
@@ -188,6 +190,12 @@ def run_rank(
 
     already = Counter(tuple(sorted(row.get("member_ids") or [])) for row in ledger.bws_rows())
     per_round = max(1, len(sets) // max(1, settings.bws_appearances))
+    meta_by_id = (
+        {str(r["id"]): photo_context(r) for r in ledger.get_assets(candidate_ids)}
+        if candidate_ids
+        else {}
+    )
+    library_size = int(ledger.summary().get("assets", len(candidate_ids)))
 
     for index, members in enumerate(sets):
         key = tuple(sorted(members))
@@ -195,9 +203,22 @@ def run_rank(
             already[key] -= 1
             stats.sets_skipped += 1
             continue
+        photos = [meta_by_id[m] for m in members if m in meta_by_id]
         try:
             images = [load_thumb_b64(settings.cache_dir, member) for member in members]
-            result = judge.bws(settings.rank_model, images)
+            if isinstance(judge, Judge):
+                system = prompts.render(
+                    "bws",
+                    model=settings.rank_model,
+                    image_count=len(images),
+                    batch_size=len(sets),
+                    total_photos=len(candidate_ids),
+                    library_size=library_size,
+                    photos=photos,
+                )
+                result = judge.bws(settings.rank_model, images, system=system)
+            else:
+                result = judge.bws(settings.rank_model, images)
         except FATAL_ERRORS:
             raise
         except ITEM_ERRORS as exc:

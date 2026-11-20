@@ -30,11 +30,13 @@ from winnow.judge import (
     extract_text,
     iter_batch_results,
     parse_message,
+    resolve_prompts,
     submit_batch,
     to_batch_request,
 )
 from winnow.ledger import Ledger
 from winnow.pipeline.scan import ProgressFn, emit, load_thumb_b64
+from winnow.prompts import photo_context
 from winnow.schemas import BurstVerdict, TriageVerdict
 
 __all__ = [
@@ -290,18 +292,38 @@ def run_triage_direct(
     Returns:
         Counters describing the run.
     """
+    prompts = resolve_prompts(judge, settings)
     stats = TriageStats()
     budget = limit
     groups = ledger.burst_groups()
+    meta_by_id = {str(r["id"]): photo_context(r) for r in ledger.get_assets()}
+    library_size = len(meta_by_id)
 
-    for burst_id in pending_burst_ids(ledger):
+    burst_ids = pending_burst_ids(ledger)
+    burst_batch_size = len(burst_ids) if budget is None else min(len(burst_ids), max(0, budget))
+    burst_total_photos = sum(len(groups.get(bid, ())) for bid in burst_ids[:burst_batch_size])
+
+    for burst_id in burst_ids:
         allowed, budget = _spend(budget)
         if not allowed:
             return stats
         members = list(groups.get(burst_id, ()))
+        photos = [meta_by_id[m] for m in members if m in meta_by_id]
         try:
             images = [load_thumb_b64(settings.cache_dir, member) for member in members]
-            result = judge.burst(settings.triage_model, images)
+            if isinstance(judge, Judge):
+                system = prompts.render(
+                    "burst",
+                    model=settings.triage_model,
+                    image_count=len(images),
+                    batch_size=burst_batch_size,
+                    total_photos=burst_total_photos,
+                    library_size=library_size,
+                    photos=photos,
+                )
+                result = judge.burst(settings.triage_model, images, system=system)
+            else:
+                result = judge.burst(settings.triage_model, images)
             winner, losers = apply_burst_verdict(
                 ledger, burst_id, members, result.verdict, result.model
             )
@@ -317,13 +339,30 @@ def run_triage_direct(
         stats.burst_losers += len(losers)
         emit(on_progress, f"burst {burst_id}: kept {winner}, dropped {len(losers)}")
 
-    for asset_id in pending_single_ids(ledger):
+    single_ids = pending_single_ids(ledger)
+    single_batch_size = (
+        len(single_ids) if budget is None else min(len(single_ids), max(0, budget))
+    )
+    for asset_id in single_ids:
         allowed, budget = _spend(budget)
         if not allowed:
             return stats
+        photos = [meta_by_id[asset_id]] if asset_id in meta_by_id else []
         try:
             image = load_thumb_b64(settings.cache_dir, asset_id)
-            result = judge.triage(settings.triage_model, image)
+            if isinstance(judge, Judge):
+                system = prompts.render(
+                    "triage",
+                    model=settings.triage_model,
+                    image_count=1,
+                    batch_size=single_batch_size,
+                    total_photos=single_batch_size,
+                    library_size=library_size,
+                    photos=photos,
+                )
+                result = judge.triage(settings.triage_model, image, system=system)
+            else:
+                result = judge.triage(settings.triage_model, image)
         except FATAL_ERRORS:
             raise
         except ITEM_ERRORS as exc:
@@ -416,19 +455,40 @@ def submit_triage_batch(
     Returns:
         The first batch id, or ``None`` when there was nothing left to judge.
     """
+    prompts = resolve_prompts(judge, settings)
     builder = _BatchBuilder(ledger, judge, on_progress)
     budget = limit
     groups = ledger.burst_groups()
+    meta_by_id = {str(r["id"]): photo_context(r) for r in ledger.get_assets()}
+    library_size = len(meta_by_id)
 
-    for burst_id in pending_burst_ids(ledger):
+    burst_ids = pending_burst_ids(ledger)
+    burst_batch_size = len(burst_ids) if budget is None else min(len(burst_ids), max(0, budget))
+    burst_total_photos = sum(len(groups.get(bid, ())) for bid in burst_ids[:burst_batch_size])
+
+    single_ids = pending_single_ids(ledger)
+    rem_budget = None if budget is None else max(0, budget - burst_batch_size)
+    single_batch_size = len(single_ids) if rem_budget is None else min(len(single_ids), rem_budget)
+
+    for burst_id in burst_ids:
         allowed, budget = _spend(budget)
         if not allowed:
             break
         members = list(groups.get(burst_id, ()))
+        photos = [meta_by_id[m] for m in members if m in meta_by_id]
         custom_id = f"{_BURST_PREFIX}{burst_id}"
         try:
             images = [load_thumb_b64(settings.cache_dir, member) for member in members]
-            kwargs = build_burst_request(settings.triage_model, images)
+            system = prompts.render(
+                "burst",
+                model=settings.triage_model,
+                image_count=len(images),
+                batch_size=burst_batch_size,
+                total_photos=burst_total_photos,
+                library_size=library_size,
+                photos=photos,
+            )
+            kwargs = build_burst_request(settings.triage_model, images, system=system)
             request = to_batch_request(custom_id, kwargs)
         except (JudgeError, OSError) as exc:
             emit(on_progress, f"burst {burst_id} not queued: {exc}")
@@ -436,14 +496,24 @@ def submit_triage_batch(
         payload = {"kind": "burst", "burst_id": burst_id, "member_ids": members}
         builder.add(custom_id, request, payload, sum(len(image) for image in images))
 
-    for asset_id in pending_single_ids(ledger):
+    for asset_id in single_ids:
         allowed, budget = _spend(budget)
         if not allowed:
             break
+        photos = [meta_by_id[asset_id]] if asset_id in meta_by_id else []
         custom_id = f"{_TRIAGE_PREFIX}{asset_id}"
         try:
             image = load_thumb_b64(settings.cache_dir, asset_id)
-            kwargs = build_triage_request(settings.triage_model, image)
+            system = prompts.render(
+                "triage",
+                model=settings.triage_model,
+                image_count=1,
+                batch_size=single_batch_size,
+                total_photos=single_batch_size,
+                library_size=library_size,
+                photos=photos,
+            )
+            kwargs = build_triage_request(settings.triage_model, image, system=system)
             request = to_batch_request(custom_id, kwargs)
         except (JudgeError, OSError) as exc:
             emit(on_progress, f"triage {asset_id} not queued: {exc}")

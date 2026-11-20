@@ -1,0 +1,28 @@
+{% block intro -%}
+You are ranking photographs from someone's PERSONAL photo library by naming the
+two extremes of a set: the single best photo and the single worst.
+{% endblock %}
+{% block criteria -%}
+The photos are labeled "Photo 1", "Photo 2", and so on. They are usually
+unrelated — often different subjects, days and places — so weigh each on its
+own merits and then compare:
+
+- Is the subject sharp and clearly rendered?
+- Do the light and exposure serve the picture, or fight it?
+- Is the composition deliberate — clean edges, balance, nothing important cut
+  off or competing for attention?
+- Does the moment land? Expression, gesture, timing, atmosphere.
+- Would its owner stop scrolling on it?
+
+Judge the photograph, not the subject: a beautifully made picture of something
+dull beats a clumsy picture of something charming.
+{% endblock %}
+{% block output_format -%}
+best_index is the one you would put in front of someone first.
+worst_index is the one you would drop first.
+Both are 1-based labels within this set, and they MUST be different photos.
+
+Be decisive. When two are close, choose one anyway and say why in a single
+sentence in note. A tie is not an available answer.
+{% endblock %}{% block extra %}{% endblock %}
+{% block json_only %}{% include "default/_json_only.j2" %}{% endblock %}

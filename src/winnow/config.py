@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_TRIAGE_MODEL = "claude-haiku-4-5"
@@ -91,6 +92,25 @@ class Settings(BaseSettings):
     # default: a big library mints hundreds of tags in the tag browser.
     keyword_tags: bool = False
     keyword_tag_prefix: str = "kw"
+
+    # --- system prompt templates ---
+    triage_prompt_path: Path | None = None
+    burst_prompt_path: Path | None = None
+    bws_prompt_path: Path | None = None
+    pair_prompt_path: Path | None = None
+
+    @field_validator(
+        "triage_prompt_path",
+        "burst_prompt_path",
+        "bws_prompt_path",
+        "pair_prompt_path",
+        mode="before",
+    )
+    @classmethod
+    def _empty_prompt_path_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def immich_base(self) -> str:
