@@ -22,6 +22,7 @@ import typer
 from anthropic import Anthropic
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
@@ -35,6 +36,7 @@ from winnow.pipeline.finals import run_finals
 from winnow.pipeline.rank import run_rank
 from winnow.pipeline.scan import ProgressFn, run_scan
 from winnow.pipeline.triage import ingest_triage_batch, run_triage_direct, submit_triage_batch
+from winnow.prompts import PROMPT_TASKS, PromptError, PromptLibrary, sample_context
 from winnow.report import write_html_report
 
 __all__ = [
@@ -177,6 +179,16 @@ def load_or_exit() -> Settings:
         raise typer.Exit(code=2) from exc
 
 
+def _load_prompts_or_exit(settings: Settings) -> PromptLibrary:
+    """Compile and validate active system prompt templates, or exit with status 2."""
+    try:
+        return PromptLibrary.from_settings(settings)
+    except PromptError as exc:
+        err_console.print("[bold red]Prompt error.[/bold red]")
+        err_console.print(str(exc), markup=False)
+        raise typer.Exit(code=2) from exc
+
+
 @contextmanager
 def session(*, immich: bool = False, judge: bool = False) -> Iterator[Session]:
     """Open the ledger — and optionally the two API clients — for one command.
@@ -189,9 +201,12 @@ def session(*, immich: bool = False, judge: bool = False) -> Iterator[Session]:
         A :class:`Session`; everything it owns is closed on the way out.
     """
     settings = load_or_exit()
+    prompts = _load_prompts_or_exit(settings) if judge else None
     ledger = Ledger(settings.db_path)
     client = ImmichClient(settings.immich_base, settings.immich_api_key) if immich else None
-    judge_obj = Judge(Anthropic(api_key=settings.anthropic_api_key)) if judge else None
+    judge_obj = (
+        Judge(Anthropic(api_key=settings.anthropic_api_key), prompts=prompts) if judge else None
+    )
     try:
         yield Session(settings=settings, ledger=ledger, immich=client, judge=judge_obj)
     finally:
@@ -353,8 +368,94 @@ def check() -> None:
         ok = False
         err_console.print(f"[bold red]FAIL[/bold red] Anthropic: {exc}")
 
+    try:
+        prompt_lib = PromptLibrary.from_settings(settings)
+        custom = [t for t in PROMPT_TASKS if prompt_lib.source(t) is not None]
+        detail = f"custom: {', '.join(custom)}" if custom else "4 defaults"
+        console.print(f"[green]OK[/green] Prompts loaded ({detail})")
+    except PromptError as exc:
+        ok = False
+        err_console.print(f"[bold red]FAIL[/bold red] Prompts: {escape(str(exc))}")
+
     if not ok:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def prompts(
+    render: Annotated[
+        str | None,
+        typer.Option(
+            "--render",
+            help="Render and print a prompt: triage, burst, bws, pair, or all.",
+        ),
+    ] = None,
+    export: Annotated[
+        Path | None,
+        typer.Option(
+            "--export",
+            help="Export the packaged default .j2 templates into this directory.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite existing files when exporting templates.",
+        ),
+    ] = False,
+) -> None:
+    """Inspect, validate, render, or export Jinja2 system prompt templates."""
+    if export is not None:
+        try:
+            written = PromptLibrary.export_defaults(export, force=force)
+        except PromptError as exc:
+            err_console.print("[bold red]Prompt error.[/bold red]")
+            err_console.print(str(exc), markup=False)
+            raise typer.Exit(code=2) from exc
+        for path in written:
+            console.print(f"Wrote {path}", markup=False, highlight=False)
+        return
+
+    if render is not None and render not in (*PROMPT_TASKS, "all"):
+        raise typer.BadParameter("--render must be triage, burst, bws, pair, or all")
+
+    settings = load_or_exit()
+    lib = _load_prompts_or_exit(settings)
+
+    if render is not None:
+        targets = PROMPT_TASKS if render == "all" else (render,)
+        for task in targets:
+            src = lib.source(task)
+            label = str(src) if src is not None else "default"
+            heading(f"Prompt: {task} ({label})")
+            ctx = sample_context(task, settings)
+            rendered = lib.render(
+                task,
+                model=ctx["model"],
+                image_count=ctx["image_count"],
+                batch_size=ctx["batch_size"],
+                total_photos=ctx["total_photos"],
+                library_size=ctx["library_size"],
+                photos=ctx["photos"],
+            )
+            console.print(rendered, markup=False, highlight=False, end="")
+        return
+
+    heading("System Prompt Templates")
+    table = Table()
+    table.add_column("task", style="bold")
+    table.add_column("source")
+    table.add_column("status")
+    for task in PROMPT_TASKS:
+        src = lib.source(task)
+        source_label = str(src) if src is not None else f"default ({task}.j2)"
+        table.add_row(task, source_label, "[green]OK[/green]")
+    console.print(table)
+    console.print(
+        "[dim]Variables: task, model, image_count, batch_size, total_photos, "
+        "library_size, photo, photos, photo_a, photo_b, settings.*[/dim]"
+    )
 
 
 @app.command()

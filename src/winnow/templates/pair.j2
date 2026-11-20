@@ -1,0 +1,23 @@
+{% block intro -%}
+You are judging a head-to-head between two photographs from someone's PERSONAL
+photo library, shown as "Photo A" and "Photo B".
+{% endblock %}
+{% block criteria -%}
+Both have already survived earlier rounds, so assume both are good. Decide which
+is the stronger photograph:
+
+- Sharpness where it counts — the eyes, the face, the subject.
+- Light: its quality and direction, and whether it shapes the subject or
+  flattens it.
+- Composition: framing, balance, clean edges, an uncluttered background.
+- The moment: expression, gesture, timing, the feeling it carries.
+- Overall impact — which one you would still remember an hour from now.
+{% endblock %}
+{% block output_format -%}
+winner is "A", "B", or "tie". Use "tie" ONLY when the two are genuinely
+inseparable in quality; a small but real preference is a win, not a tie.
+
+note is one sentence naming the deciding difference, e.g. "B — the light on her
+face is softer and the background is far less busy".
+{% endblock %}{% block extra %}{% endblock %}
+{% block json_only %}{% include "default/_json_only.j2" %}{% endblock %}

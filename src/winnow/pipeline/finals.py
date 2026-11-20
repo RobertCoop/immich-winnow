@@ -14,13 +14,16 @@ into star bands, which is what the write-back stage turns into ratings.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from winnow.config import Settings
-from winnow.judge import FATAL_ERRORS, ITEM_ERRORS, Judge
+from winnow.judge import FATAL_ERRORS, ITEM_ERRORS, Judge, resolve_prompts
 from winnow.ledger import Ledger
 from winnow.pipeline.rank import collect_pairs, refit_scores
 from winnow.pipeline.scan import ProgressFn, emit, load_thumb_b64
+from winnow.prompts import PromptLibrary, photo_context
 from winnow.ranking import TIE, star_bands, swiss_pairs
 
 __all__ = [
@@ -92,6 +95,13 @@ def judge_pair_twice(
     judge: Judge,
     a_id: str,
     b_id: str,
+    *,
+    photo_a: Mapping[str, Any] | None = None,
+    photo_b: Mapping[str, Any] | None = None,
+    batch_size: int | None = None,
+    total_photos: int | None = None,
+    library_size: int | None = None,
+    prompts: PromptLibrary | None = None,
 ) -> PairOutcome:
     """Judge ``a`` against ``b`` twice, swapping which photo is shown first.
 
@@ -103,8 +113,34 @@ def judge_pair_twice(
     """
     a_b64 = load_thumb_b64(settings.cache_dir, a_id)
     b_b64 = load_thumb_b64(settings.cache_dir, b_id)
-    forward = judge.pair(settings.finals_model, a_b64, b_b64)
-    reverse = judge.pair(settings.finals_model, b_b64, a_b64)
+    if isinstance(judge, Judge):
+        prompt_lib = prompts or resolve_prompts(judge, settings)
+        has_pair_meta = photo_a is not None and photo_b is not None
+        forward_photos = [photo_a, photo_b] if has_pair_meta else None
+        reverse_photos = [photo_b, photo_a] if has_pair_meta else None
+        forward_system = prompt_lib.render(
+            "pair",
+            model=settings.finals_model,
+            image_count=2,
+            batch_size=batch_size,
+            total_photos=total_photos,
+            library_size=library_size,
+            photos=forward_photos,
+        )
+        reverse_system = prompt_lib.render(
+            "pair",
+            model=settings.finals_model,
+            image_count=2,
+            batch_size=batch_size,
+            total_photos=total_photos,
+            library_size=library_size,
+            photos=reverse_photos,
+        )
+        forward = judge.pair(settings.finals_model, a_b64, b_b64, system=forward_system)
+        reverse = judge.pair(settings.finals_model, b_b64, a_b64, system=reverse_system)
+    else:
+        forward = judge.pair(settings.finals_model, a_b64, b_b64)
+        reverse = judge.pair(settings.finals_model, b_b64, a_b64)
 
     first = {"A": a_id, "B": b_id, "tie": TIE}[forward.verdict.winner]
     second = {"A": b_id, "B": a_id, "tie": TIE}[reverse.verdict.winner]
@@ -165,6 +201,7 @@ def run_finals(
     Returns:
         Counters describing the run.
     """
+    prompts = resolve_prompts(judge, settings)
     stats = FinalsStats()
     n_scored = sum(1 for row in ledger.score_rows() if row.get("bt_score") is not None)
     five_target = five_count
@@ -185,6 +222,8 @@ def run_finals(
         if row.get("bt_score") is not None and str(row["asset_id"]) in pool_set
     }
     history = _finals_history(ledger)
+    meta_by_id = {str(r["id"]): photo_context(r) for r in ledger.get_assets(pool)}
+    library_size = int(ledger.summary().get("assets", len(pool)))
 
     for round_number in range(1, settings.finals_rounds + 1):
         pairings = swiss_pairs(scores, history)
@@ -197,7 +236,18 @@ def run_finals(
                 stats.pairs_skipped += 1
                 continue
             try:
-                outcome = judge_pair_twice(settings, judge, a_id, b_id)
+                outcome = judge_pair_twice(
+                    settings,
+                    judge,
+                    a_id,
+                    b_id,
+                    photo_a=meta_by_id.get(a_id),
+                    photo_b=meta_by_id.get(b_id),
+                    batch_size=len(pairings),
+                    total_photos=len(pool),
+                    library_size=library_size,
+                    prompts=prompts,
+                )
             except FATAL_ERRORS:
                 raise
             except (*ITEM_ERRORS, KeyError) as exc:
